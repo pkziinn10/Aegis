@@ -1,0 +1,16 @@
+/home/pk/studing/ApiWeb/src/MyApp.Application/bin/Debug/net10.0/MyApp.Application.deps.json
+/home/pk/studing/ApiWeb/src/MyApp.Application/bin/Debug/net10.0/MyApp.Application.dll
+/home/pk/studing/ApiWeb/src/MyApp.Application/bin/Debug/net10.0/MyApp.Application.pdb
+/home/pk/studing/ApiWeb/src/MyApp.Application/bin/Debug/net10.0/MyApp.Domain.dll
+/home/pk/studing/ApiWeb/src/MyApp.Application/bin/Debug/net10.0/MyApp.Domain.pdb
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.csproj.AssemblyReference.cache
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.GeneratedMSBuildEditorConfig.editorconfig
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.AssemblyInfoInputs.cache
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.AssemblyInfo.cs
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.csproj.CoreCompileInputs.cache
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.sourcelink.json
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Ap.B540CA8A.Up2Date
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.dll
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/refint/MyApp.Application.dll
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/MyApp.Application.pdb
+/home/pk/studing/ApiWeb/src/MyApp.Application/obj/Debug/net10.0/ref/MyApp.Application.dll

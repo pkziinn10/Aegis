@@ -1,0 +1,12 @@
+/home/pk/studing/ApiWeb/src/MyApp.Domain/bin/Debug/net10.0/MyApp.Domain.deps.json
+/home/pk/studing/ApiWeb/src/MyApp.Domain/bin/Debug/net10.0/MyApp.Domain.dll
+/home/pk/studing/ApiWeb/src/MyApp.Domain/bin/Debug/net10.0/MyApp.Domain.pdb
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.GeneratedMSBuildEditorConfig.editorconfig
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.AssemblyInfoInputs.cache
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.AssemblyInfo.cs
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.csproj.CoreCompileInputs.cache
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.sourcelink.json
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.dll
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/refint/MyApp.Domain.dll
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/MyApp.Domain.pdb
+/home/pk/studing/ApiWeb/src/MyApp.Domain/obj/Debug/net10.0/ref/MyApp.Domain.dll
