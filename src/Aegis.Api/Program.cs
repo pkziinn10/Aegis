@@ -1,9 +1,10 @@
-using System.IdentityModel.Tokens.Jwt;
-using System.Text;
 using System.Threading.RateLimiting;
 using Aegis.Api.Configuration;
+using Aegis.Api.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.CookiePolicy;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,7 +24,7 @@ builder.Services.AddOptions<JwtOptions>()
         "JWT audience must be Aegis.Client.")
     .Validate(options => options.KeyId == "aegis-primary-01",
         "JWT key id must be aegis-primary-01.")
-    .Validate(options => options.AccessTokenExpirationMinutes is > 0 and <= 15,
+    .Validate(JwtOptions.HasValidExpirationWindow,
         "Access token expiration must be between 1 and 15 minutes.")
     .Validate(options => options.RefreshTokenExpirationDays is > 0 and <= 7,
         "Refresh token expiration must be between 1 and 7 days.")
@@ -31,80 +32,44 @@ builder.Services.AddOptions<JwtOptions>()
         "Clock skew must be between 0 and 30 seconds.")
     .ValidateOnStart();
 
-var jwtOptions = builder.Configuration
-    .GetSection(JwtOptions.SectionName)
-    .Get<JwtOptions>()
-    ?? throw new InvalidOperationException("JWT configuration is required.");
-
-var signingKey = new SymmetricSecurityKey(
-    Encoding.UTF8.GetBytes(jwtOptions.SecretKey));
-
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.MapInboundClaims = false;
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuerSigningKey = true,
-            ValidateIssuer = true,
-            ValidIssuer = jwtOptions.Issuer,
-            ValidateAudience = true,
-            ValidAudience = jwtOptions.Audience,
-            ValidateLifetime = true,
-            RequireExpirationTime = true,
-            RequireSignedTokens = true,
-            ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
-            ClockSkew = TimeSpan.FromSeconds(jwtOptions.ClockSkewSeconds),
-            NameClaimType = JwtRegisteredClaimNames.Sub,
-            RoleClaimType = "roles",
-            IssuerSigningKeyResolver = (_, _, tokenKid, _) =>
-            {
-                if (!string.Equals(
-                        tokenKid,
-                        jwtOptions.KeyId,
-                        StringComparison.Ordinal))
-                {
-                    return [];
-                }
+    .AddJwtBearer();
 
-                return [signingKey];
-            }
-        };
-
-        options.Events = new JwtBearerEvents
-        {
-            OnTokenValidated = context =>
-            {
-                if (string.IsNullOrWhiteSpace(
-                        context.Principal?.FindFirst(
-                            JwtRegisteredClaimNames.Sub)?.Value))
-                {
-                    context.Fail("The JWT must contain a subject claim.");
-                }
-
-                return Task.CompletedTask;
-            }
-        };
-    });
+builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>, JwtBearerOptionsConfigurator>();
 
 builder.Services.AddAuthorization();
 
-var allowedOrigins = builder.Configuration
-    .GetSection("Cors:AllowedOrigins")
-    .Get<string[]>();
+builder.Services.AddOptions<CorsOptions>()
+    .BindConfiguration(CorsOptions.SectionName)
+    .Validate(CorsOptions.IsValid,
+        "Cors origins must be unique absolute HTTPS URIs without paths, queries, fragments or wildcards.")
+    .ValidateOnStart();
 
-if (allowedOrigins is null
-    || allowedOrigins.Length == 0
-    || allowedOrigins.Any(string.IsNullOrWhiteSpace))
+var corsOptions = builder.Configuration.GetSection(CorsOptions.SectionName).Get<CorsOptions>()
+    ?? throw new InvalidOperationException("Cors configuration is required.");
+if (!CorsOptions.IsValid(corsOptions))
 {
-    throw new InvalidOperationException(
-        "Cors:AllowedOrigins must contain at least one origin.");
+    throw new InvalidOperationException("Cors:AllowedOrigins configuration is invalid.");
 }
+
+var allowedHosts = builder.Configuration["AllowedHosts"];
+if (!AllowedHostsOptions.IsValid(allowedHosts))
+    throw new InvalidOperationException("AllowedHosts must contain unique explicit host names or IP addresses.");
+
+builder.Services.AddOptions<ReverseProxyOptions>()
+    .BindConfiguration(ReverseProxyOptions.SectionName)
+    .Validate(ReverseProxyOptions.IsValid,
+        "Enabled reverse proxy must contain unique valid known proxy IP addresses.")
+    .ValidateOnStart();
+var reverseProxyOptions = builder.Configuration.GetSection(ReverseProxyOptions.SectionName).Get<ReverseProxyOptions>()
+    ?? new ReverseProxyOptions();
+if (!ReverseProxyOptions.IsValid(reverseProxyOptions))
+    throw new InvalidOperationException("ReverseProxy configuration is invalid.");
 
 builder.Services.AddCors(options =>
     options.AddPolicy("Browser", policy =>
-        policy.WithOrigins(allowedOrigins)
+        policy.WithOrigins(corsOptions.AllowedOrigins)
             .AllowCredentials()
             .WithHeaders("Authorization", "Content-Type", "X-CSRF-TOKEN")
             .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")));
@@ -133,7 +98,7 @@ builder.Services.AddRateLimiter(options =>
             "{\"title\":\"Too Many Requests\",\"status\":429}");
     };
 
-    options.AddPolicy("AuthByIp", context =>
+    options.AddPolicy(SecurityPolicyNames.AuthByIp, context =>
         RateLimitPartition.GetFixedWindowLimiter(
             context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             _ => new FixedWindowRateLimiterOptions
@@ -146,6 +111,21 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+if (reverseProxyOptions.Enabled)
+{
+    var forwardedHeaders = new ForwardedHeadersOptions
+    {
+        ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+        ForwardLimit = 1,
+        RequireHeaderSymmetry = true
+    };
+    forwardedHeaders.KnownIPNetworks.Clear();
+    forwardedHeaders.KnownProxies.Clear();
+    foreach (var proxy in reverseProxyOptions.KnownProxies)
+        forwardedHeaders.KnownProxies.Add(System.Net.IPAddress.Parse(proxy));
+    app.UseForwardedHeaders(forwardedHeaders);
+}
 
 if (app.Environment.IsDevelopment())
 {
@@ -166,3 +146,5 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+public partial class Program;

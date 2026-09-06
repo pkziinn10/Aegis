@@ -1,4 +1,5 @@
 using System.Text;
+using System.Globalization;
 
 namespace Aegis.Api.Configuration;
 
@@ -26,5 +27,16 @@ public sealed class JwtOptions
     {
         return !string.IsNullOrWhiteSpace(options.SecretKey)
             && Encoding.UTF8.GetByteCount(options.SecretKey) >= 32;
+    }
+
+    public static bool HasValidExpirationWindow(JwtOptions options)
+    {
+        return options.AccessTokenExpirationMinutes is > 0 and <= 15;
+    }
+
+    public static bool TryReadNumericDate(string? value, out long unixSeconds)
+    {
+        return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out unixSeconds)
+            && unixSeconds >= 0;
     }
 }
