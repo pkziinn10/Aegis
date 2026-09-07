@@ -10,6 +10,9 @@ public interface ISessionRepository
     /// <summary>
     /// Carrega histórico, detecta reuso e, nessa mesma transação, revoga a família
     /// antes de retornar <see cref="SessionRotationCode.RefreshTokenReuse"/>.
+    /// Reuso de hash revogado prevalece sobre conflito CAS: a implementação deve
+    /// recarregar o histórico e revogar a família atomicamente antes de retornar
+    /// <see cref="SessionRotationCode.RefreshTokenReuse"/>.
     /// </summary>
     Task<SessionRotationResult> RotateAndPersistAtomicallyAsync(Guid sessionId, string presentedHash,
         RefreshToken replacement, DateTimeOffset now, long expectedVersion,

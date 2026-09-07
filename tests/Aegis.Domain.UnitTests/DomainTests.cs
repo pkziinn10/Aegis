@@ -52,6 +52,47 @@ public sealed class DomainTests
         Assert.Equal(id, user.Id);
         Assert.Equal(UserRole.Admin, user.Role);
         Assert.False(user.IsActive);
+        Assert.Equal(3, user.Version);
+    }
+
+    [Fact]
+    public void User_incrementa_version_somente_em_mutacoes_efetivas()
+    {
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), version: 4);
+
+        user.ChangeEmail(new Email("USER@example.com"));
+        user.ChangeRole(UserRole.User);
+        user.Activate();
+        Assert.Equal(4, user.Version);
+
+        user.ChangeEmail(new Email("other@example.com"));
+        user.ChangeRole(UserRole.Admin);
+        user.Deactivate();
+        user.Activate();
+        Assert.Equal(8, user.Version);
+    }
+
+    [Fact]
+    public void User_rejeita_version_invalida()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new User(Guid.NewGuid(), new Email("user@example.com"), version: 0));
+    }
+
+    [Fact]
+    public void User_rehidratado_preserva_estado_e_version()
+    {
+        var id = Guid.NewGuid();
+        var email = new Email("user@example.com");
+        var user = User.Rehydrate(id, email, UserRole.Admin, false, 7);
+
+        Assert.Equal(id, user.Id);
+        Assert.Equal(email, user.Email);
+        Assert.Equal(UserRole.Admin, user.Role);
+        Assert.False(user.IsActive);
+        Assert.Equal(7, user.Version);
+        user.Activate();
+        Assert.Equal(8, user.Version);
     }
 
     [Fact]
@@ -78,6 +119,30 @@ public sealed class DomainTests
     }
 
     [Fact]
+    public void Rotacao_rejeita_replacement_fora_da_cronologia_da_sessao_sem_mutar()
+    {
+        var session = CreateSession(out var current);
+        var createdBeforeSession = new RefreshToken(Guid.NewGuid(), session.Id, "before",
+            Now.AddMinutes(-1), Now.AddHours(1));
+        var result = session.Rotate(current.Hash, createdBeforeSession, Now.AddMinutes(1));
+
+        Assert.Equal(DomainErrorCode.InvalidRefreshToken, result.ErrorCode);
+        Assert.Equal(1, session.Version);
+        Assert.Null(current.RevokedAt);
+        Assert.Single(session.RefreshTokens);
+
+        session = CreateSession(out current);
+        var expiresAfterSession = new RefreshToken(Guid.NewGuid(), session.Id, "after",
+            Now, Now.AddHours(4));
+        result = session.Rotate(current.Hash, expiresAfterSession, Now.AddMinutes(1));
+
+        Assert.Equal(DomainErrorCode.InvalidRefreshToken, result.ErrorCode);
+        Assert.Equal(1, session.Version);
+        Assert.Null(current.RevokedAt);
+        Assert.Single(session.RefreshTokens);
+    }
+
+    [Fact]
     public void Refresh_expirado_recusa_rotacao_sem_revogar_sessao()
     {
         var session = CreateSession(out var current);
@@ -101,6 +166,38 @@ public sealed class DomainTests
 
         Assert.Equal(DomainErrorCode.RefreshTokenReuse, result.ErrorCode);
         Assert.NotNull(session.RevokedAt);
+        Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));
+    }
+
+    [Fact]
+    public void Reuso_so_retorna_apos_revogar_familia_com_sucesso()
+    {
+        var sessionId = Guid.NewGuid();
+        var current = Token(sessionId, "current", Now.AddHours(3));
+        var future = new RefreshToken(Guid.NewGuid(), sessionId, "future", Now.AddHours(2), Now.AddHours(3));
+        var session = new Session(sessionId, Guid.NewGuid(), Now, Now.AddHours(4), new[] { current, future });
+        var replacement = Token(sessionId, "replacement", Now.AddHours(1));
+        Assert.True(session.Rotate(current.Hash, replacement, Now.AddMinutes(1)).IsSuccess);
+
+        var result = session.Rotate(current.Hash, Token(sessionId, "ignored", Now.AddHours(1)), Now.AddHours(1.5));
+
+        Assert.Equal(DomainErrorCode.InvalidRefreshToken, result.ErrorCode);
+        Assert.Null(session.RevokedAt);
+        Assert.Null(future.RevokedAt);
+    }
+
+    [Fact]
+    public void Reuso_com_replacement_de_outra_sessao_revoga_familia()
+    {
+        var session = CreateSession(out var current);
+        session.Rotate(current.Hash, Token(session.Id, "replacement", Now.AddHours(2)), Now.AddMinutes(1));
+        var otherSessionId = Guid.NewGuid();
+        var replacement = Token(otherSessionId, "other-session", Now.AddHours(2));
+
+        var result = session.Rotate(current.Hash, replacement, Now.AddMinutes(2));
+
+        Assert.Equal(DomainErrorCode.RefreshTokenReuse, result.ErrorCode);
+        Assert.True(session.IsRevoked);
         Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));
     }
 
@@ -148,6 +245,35 @@ public sealed class DomainTests
     }
 
     [Fact]
+    public void Rotacao_antes_da_criacao_do_refresh_nao_muta_sessao()
+    {
+        var sessionId = Guid.NewGuid();
+        var future = new RefreshToken(Guid.NewGuid(), sessionId, "future", Now.AddHours(1), Now.AddHours(2));
+        var session = Session.Rehydrate(sessionId, Guid.NewGuid(), Now, Now.AddHours(4),
+            new[] { future }, null, null, 1);
+
+        var result = session.Rotate(future.Hash, Token(sessionId, "replacement", Now.AddHours(1)), Now);
+
+        Assert.Equal(DomainErrorCode.InvalidRefreshToken, result.ErrorCode);
+        Assert.Equal(1, session.Version);
+        Assert.Null(future.RevokedAt);
+        Assert.Single(session.RefreshTokens);
+    }
+
+    [Fact]
+    public void Revoke_rejeita_motivo_invalido_sem_mutar()
+    {
+        var session = CreateSession(out var current);
+
+        var result = session.Revoke(Now.AddMinutes(1), (SessionRevocationReason)99);
+
+        Assert.Equal(DomainErrorCode.InvalidRefreshToken, result.ErrorCode);
+        Assert.Null(session.RevokedAt);
+        Assert.Null(current.RevokedAt);
+        Assert.Equal(1, session.Version);
+    }
+
+    [Fact]
     public void Reidratação_exige_estado_de_revogação_coerente()
     {
         var sessionId = Guid.NewGuid();
@@ -166,7 +292,7 @@ public sealed class DomainTests
     }
 
     [Fact]
-    public void Reidratação_aceita_refresh_atual_criado_após_sessão()
+    public void Reidratação_rejeita_refresh_criado_antes_da_sessao_ou_apos_expirar()
     {
         var sessionId = Guid.NewGuid();
         var old = RefreshToken.Rehydrate(Guid.NewGuid(), sessionId, "old", Now,
@@ -174,11 +300,13 @@ public sealed class DomainTests
         var current = RefreshToken.Rehydrate(Guid.NewGuid(), sessionId, "current", Now.AddMinutes(2),
             Now.AddHours(3), null);
 
-        var restored = Session.Rehydrate(sessionId, Guid.NewGuid(), Now, Now.AddHours(4),
-            new[] { old, current }, null, null, 3);
+        Assert.Throws<ArgumentException>(() => Session.Rehydrate(sessionId, Guid.NewGuid(), Now,
+            Now.AddHours(2), new[] { old, current }, null, null, 3));
 
-        Assert.Equal(3, restored.Version);
-        Assert.Single(restored.RefreshTokens, token => token.RevokedAt is null);
+        var tooLate = RefreshToken.Rehydrate(Guid.NewGuid(), sessionId, "too-late", Now,
+            Now.AddHours(5), null);
+        Assert.Throws<ArgumentException>(() => Session.Rehydrate(sessionId, Guid.NewGuid(), Now,
+            Now.AddHours(4), new[] { tooLate }, null, null, 3));
     }
 
     [Fact]
