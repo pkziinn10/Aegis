@@ -43,7 +43,7 @@ public sealed class SessionRepository(AegisDbContext db, TransactionRunner trans
         var domain = ToDomain(row)!;
         if (domain.RefreshTokens.Any(x => x.Hash == presentedHash && x.RevokedAt is not null)) { domain.Revoke(now, SessionRevocationReason.RefreshTokenReuse); Copy(row, domain); await db.SaveChangesAsync(token); return new(SessionRotationCode.RefreshTokenReuse, DomainResult.Failure(DomainErrorCode.RefreshTokenReuse)); }
         if (row.Version != expectedVersion) return new(SessionRotationCode.ConcurrencyConflict);
-        var result = domain.Rotate(presentedHash, replacement, now); if (result.IsFailure) return new(Map(result), result);
+        var result = domain.Rotate(presentedHash, replacement, now); if (result.IsFailure) return new(Map(result), result); db.ChangeTracker.Clear();
         var changed = await db.Sessions.Where(x => x.Id == id && x.Version == expectedVersion).ExecuteUpdateAsync(x => x.SetProperty(y => y.Version, expectedVersion + 1), token);
         if (changed != 1)
         {

@@ -40,4 +40,18 @@ public sealed class SecurityInfrastructureTests
         Assert.Equal("HS256", parsed.Header.Alg);
         Assert.DoesNotContain("[REDACTED", token.Value);
     }
+
+    [Fact]
+    public void Jwt_role_claim_is_lowercase()
+    {
+        var issuer = new JwtAccessTokenIssuer(Options.Create(new JwtOptions
+        {
+            Keys = [new JwtSigningKey { Kid = "2026-01", Secret = new string('x', 64), Current = true }]
+        }));
+
+        var token = issuer.Issue(Guid.NewGuid(), Aegis.Domain.Enums.UserRole.User, DateTimeOffset.UtcNow);
+        var parsed = new JwtSecurityTokenHandler().ReadJwtToken(token.Value);
+
+        Assert.Equal("user", parsed.Claims.Single(x => x.Type == "roles").Value);
+    }
 }

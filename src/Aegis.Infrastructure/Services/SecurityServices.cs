@@ -75,7 +75,7 @@ public sealed class JwtAccessTokenIssuer(Microsoft.Extensions.Options.IOptions<J
     public AccessToken Issue(Guid userId, UserRole role, DateTimeOffset issuedAt)
     {
         var o = options.Value; var key = o.CurrentKey; var credentials = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key.Secret)), SecurityAlgorithms.HmacSha256);
-        var expires = issuedAt.AddMinutes(o.AccessTokenExpirationMinutes); var token = new JwtSecurityToken(o.Issuer, o.Audience, [new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()), new Claim("roles", role.ToString()), new Claim(JwtRegisteredClaimNames.Iat, issuedAt.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64)], issuedAt.UtcDateTime, expires.UtcDateTime, credentials);
+        var expires = issuedAt.AddMinutes(o.AccessTokenExpirationMinutes); var token = new JwtSecurityToken(o.Issuer, o.Audience, [new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()), new Claim("roles", role.ToString().ToLowerInvariant()), new Claim(JwtRegisteredClaimNames.Iat, issuedAt.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64)], issuedAt.UtcDateTime, expires.UtcDateTime, credentials);
         token.Header["kid"] = key.Kid;
         return new(new JwtSecurityTokenHandler().WriteToken(token), "Bearer", expires);
     }

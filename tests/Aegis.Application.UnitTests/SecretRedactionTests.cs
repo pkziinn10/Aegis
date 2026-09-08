@@ -17,5 +17,11 @@ public sealed class SecretRedactionTests
         Assert.DoesNotContain("hash-secret", material.ToString());
         Assert.DoesNotContain("password-secret", new ChangePasswordCommand("password-secret", "new-password-secret").ToString());
         Assert.DoesNotContain("refresh-secret", new RefreshCommand(refresh.Value).ToString());
+
+        var tokens = new TokenResult(access, new RefreshTokenDto(refresh.Value));
+        Assert.DoesNotContain("access-secret", tokens.ToString());
+        Assert.DoesNotContain("refresh-secret", tokens.ToString());
+        Assert.DoesNotContain("access-secret", new LoginResult(new(Guid.NewGuid(), "safe@a.com", Aegis.Domain.Enums.UserRole.User), tokens).ToString());
+        Assert.DoesNotContain("refresh-secret", new RegisterResult(new(Guid.NewGuid(), "safe@a.com", Aegis.Domain.Enums.UserRole.User), tokens).ToString());
     }
 }

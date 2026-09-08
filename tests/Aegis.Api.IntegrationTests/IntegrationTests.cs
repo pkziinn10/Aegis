@@ -312,6 +312,9 @@ public sealed class RateLimitIntegrationTests
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         Assert.Equal("Too Many Requests", problem?.Title);
         Assert.Equal(429, problem?.Status);
+        var problemBody = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("RateLimitExceeded", problemBody.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(problemBody.GetProperty("traceId").GetString()));
 
         using var otherIp = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
         otherIp.Headers.Add("X-Test-Remote-IP", "10.0.0.2");
@@ -360,6 +363,48 @@ public sealed class IdentityApiIntegrationTests
         var response = await client.GetAsync("/api/auth/me");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertProblem(response, "Unauthorized", 401);
+    }
+
+    [Fact]
+    public async Task Oversized_bearer_is_rejected_before_authentication()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", new string('x', 8 * 1024));
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertProblem(response, "InvalidBearerToken", 401);
+    }
+
+    [Fact]
+    public async Task Oversized_auth_payload_is_rejected_before_password_processing()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/auth/token/login")
+        {
+            Content = JsonContent.Create(new { email = "payload@example.com", password = new string('p', 17 * 1024) })
+        };
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        AssertProblem(response, "PayloadTooLarge", 413);
+        Assert.DoesNotContain("InvalidPasswordHash", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Admin_token_is_accepted_by_admin_endpoint()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateAdminToken());
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/integration/role")).StatusCode);
     }
 
     [Fact]
@@ -377,6 +422,33 @@ public sealed class IdentityApiIntegrationTests
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        AssertProblem(response, "InvalidRequest", 403);
+    }
+
+    private static string CreateAdminToken()
+    {
+        var now = DateTimeOffset.UtcNow.AddSeconds(-5);
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, "integration-admin"),
+            new Claim(JwtRegisteredClaimNames.Iat, now.ToUnixTimeSeconds().ToString()),
+            new Claim("roles", "admin")
+        };
+        var credentials = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TestSettings.Secret)) { KeyId = "aegis-primary-01" },
+            SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken("Aegis.Api", "Aegis.Client", claims,
+            now.UtcDateTime, now.AddMinutes(5).UtcDateTime, credentials);
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static void AssertProblem(HttpResponseMessage response, string code, int status)
+    {
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        var body = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult()).RootElement;
+        Assert.Equal(status, body.GetProperty("status").GetInt32());
+        Assert.Equal(code, body.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("traceId").GetString()));
     }
 
     [Fact]
@@ -392,6 +464,7 @@ public sealed class IdentityApiIntegrationTests
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Contains("\"code\":\"InvalidRequest\"", body);
+        Assert.Contains("traceId", body);
         Assert.DoesNotContain("InvalidPasswordHash", body);
     }
 

@@ -24,7 +24,19 @@ public sealed record ChangePasswordCommand(string CurrentPassword, string NewPas
     public override string ToString() => "ChangePasswordCommand(CurrentPassword=[REDACTED], NewPassword=[REDACTED])";
 }
 public sealed record UserDto(Guid Id, string Email, UserRole Role);
-public sealed record RefreshTokenDto(string Value);
-public sealed record TokenResult(AccessToken AccessToken, RefreshTokenDto RefreshToken);
-public sealed record RegisterResult(UserDto User, TokenResult Tokens);
-public sealed record LoginResult(UserDto User, TokenResult Tokens);
+public sealed record RefreshTokenDto(string Value)
+{
+    public override string ToString() => "RefreshTokenDto(Value=[REDACTED])";
+}
+public sealed record TokenResult(AccessToken AccessToken, RefreshTokenDto RefreshToken)
+{
+    public override string ToString() => "TokenResult(AccessToken=[REDACTED], RefreshToken=[REDACTED])";
+}
+public sealed record RegisterResult(UserDto User, TokenResult Tokens)
+{
+    public override string ToString() => $"RegisterResult(User={User}, Tokens=[REDACTED])";
+}
+public sealed record LoginResult(UserDto User, TokenResult Tokens)
+{
+    public override string ToString() => $"LoginResult(User={User}, Tokens=[REDACTED])";
+}
