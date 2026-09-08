@@ -13,6 +13,7 @@ public static class DependencyInjection
         services.AddScoped<LogoutUseCase>();
         services.AddScoped<GetMeUseCase>();
         services.AddScoped<ChangePasswordUseCase>();
+        services.AddScoped<DeactivateUserUseCase>();
         return services;
     }
 }
