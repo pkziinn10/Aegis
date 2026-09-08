@@ -1,4 +1,5 @@
 using System.Threading.RateLimiting;
+using Aegis.Api;
 using Aegis.Api.Configuration;
 using Aegis.Api.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -11,8 +12,19 @@ using Aegis.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers();
+builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
+    options.InvalidModelStateResponseFactory = context =>
+        ApiErrors.From(context.HttpContext, Aegis.Application.Results.ApplicationErrorCode.InvalidRequest));
 builder.Services.AddOpenApi();
+builder.Services.AddAntiforgery(options =>
+{
+    options.HeaderName = "X-CSRF-TOKEN";
+    options.Cookie.Name = "__Host-csrf-token";
+    options.Cookie.HttpOnly = false;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.Cookie.Path = "/";
+});
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -23,7 +35,12 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddAegisApplication();
 builder.Services.AddAegisInfrastructure(builder.Configuration);
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(SecurityPolicyNames.AuthenticatedUser, policy => policy.RequireAuthenticatedUser());
+    options.AddPolicy(SecurityPolicyNames.AdminOnly, policy => policy.RequireAuthenticatedUser().RequireRole("admin"));
+});
+builder.Services.AddSingleton<OriginValidator>();
 
 builder.Services.AddOptions<CorsOptions>()
     .BindConfiguration(CorsOptions.SectionName)
@@ -96,6 +113,19 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+{
+    context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+    context.Response.ContentType = "application/problem+json";
+    await context.Response.WriteAsJsonAsync(new
+    {
+        title = "Internal Server Error",
+        status = 500,
+        code = "InternalServerError",
+        traceId = context.TraceIdentifier
+    });
+}));
 
 if (reverseProxyOptions.Enabled)
 {

@@ -32,7 +32,7 @@ public sealed class AuthenticationUseCaseTests
     [Fact]
     public async Task Logout_is_idempotent_when_session_does_not_exist()
     {
-        var result = await new LogoutUseCase(new FakeSessions(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new(new RefreshTokenValue("refresh", DateTimeOffset.UtcNow)));
+        var result = await new LogoutUseCase(new FakeSessions(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("refresh"));
         Assert.True(result.IsSuccess);
     }
 
@@ -146,7 +146,7 @@ public sealed class AuthenticationUseCaseTests
     public async Task Logout_sends_hash_to_idempotent_contract_without_load_or_cas()
     {
         var sessions = new FakeSessions();
-        var result = await new LogoutUseCase(sessions, new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new(new RefreshTokenValue("presented", DateTimeOffset.UtcNow)));
+        var result = await new LogoutUseCase(sessions, new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("presented"));
         Assert.True(result.IsSuccess);
         Assert.Equal("refresh-hash", sessions.RevokedHash);
         Assert.Equal(1, sessions.RevokeByHashCalls);
@@ -161,7 +161,7 @@ public sealed class AuthenticationUseCaseTests
         var session = NewSession(now, "old-hash");
         var sessions = new FakeSessions { Session = session };
         var unit = new FakeUnit();
-        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "new-token", "new-hash"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "new-token", "new-hash"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new("old-token"));
         Assert.True(result.IsSuccess);
         Assert.Equal(2, session.Version);
         Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
@@ -175,7 +175,7 @@ public sealed class AuthenticationUseCaseTests
         session.Rotate("old-hash", new RefreshToken(Guid.NewGuid(), session.Id, "replacement", now, now.AddDays(1)), now);
         var sessions = new FakeSessions { Session = session };
         var unit = new FakeUnit();
-        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "replacement-token", "replacement"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "replacement-token", "replacement"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new("old-token"));
         Assert.Equal(ApplicationErrorCode.RefreshTokenReuse, result.ErrorCode);
         Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
         Assert.True(session.IsRevoked);
@@ -192,7 +192,7 @@ public sealed class AuthenticationUseCaseTests
         var unit = new FakeUnit();
 
         var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash"), new FakeIssuer(), users, new FakeClock(now), unit, new RefreshTokenPolicy(2))
-            .ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+            .ExecuteAsync(new("old-token"));
 
         Assert.Equal(ApplicationErrorCode.InvalidCredentials, result.ErrorCode);
         Assert.Equal(1, sessions.RevokeAllCalls);
@@ -207,18 +207,21 @@ public sealed class AuthenticationUseCaseTests
         var session = NewSession(now, "old-hash");
         var sessions = new FakeSessions { Session = session };
         var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "new-token", "new-hash"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), new FakeUnit(), new RefreshTokenPolicy(2))
-            .ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+            .ExecuteAsync(new("old-token"));
 
         Assert.True(result.IsSuccess);
-        Assert.Equal(now.AddDays(2), result.Value!.RefreshToken.ExpiresAt);
+        Assert.Equal("new-token", result.Value!.RefreshToken.Value);
     }
 
     [Fact]
-    public void Serialization_omits_password_hashes_and_token_values()
+    public void Serialization_presents_refresh_token_value_without_expiration_or_secrets()
     {
-        var json = JsonSerializer.Serialize(new LoginResult(new(Guid.NewGuid(), "safe@a.com", UserRole.User), new(new AccessToken("access-secret", "Bearer", DateTimeOffset.UtcNow.AddMinutes(1)), new RefreshTokenValue("refresh-secret", DateTimeOffset.UtcNow.AddDays(1)))));
+        var json = JsonSerializer.Serialize(new LoginResult(new(Guid.NewGuid(), "safe@a.com", UserRole.User), new(new AccessToken("access-secret", "Bearer", DateTimeOffset.UtcNow.AddMinutes(1)), new RefreshTokenDto("refresh-secret"))));
         Assert.DoesNotContain("access-secret", json);
-        Assert.DoesNotContain("refresh-secret", json);
+        using var document = JsonDocument.Parse(json);
+        var refreshToken = document.RootElement.GetProperty("Tokens").GetProperty("RefreshToken");
+        Assert.Equal("refresh-secret", refreshToken.GetProperty("Value").GetString());
+        Assert.False(refreshToken.TryGetProperty("ExpiresAt", out _));
         Assert.DoesNotContain("Password", json);
         Assert.DoesNotContain("Hash", json);
     }
