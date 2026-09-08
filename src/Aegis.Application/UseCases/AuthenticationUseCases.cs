@@ -182,13 +182,14 @@ public sealed class ChangePasswordUseCase(IUserRepository users, ISessionReposit
         if (string.IsNullOrEmpty(command.CurrentPassword)) return ApplicationResult.Failure(ApplicationErrorCode.InvalidCredentials);
         if (!hasher.Verify(command.CurrentPassword, user.PasswordHash)) return ApplicationResult.Failure(ApplicationErrorCode.InvalidCredentials);
         var expected = user.Version;
+        var updatedUser = User.Rehydrate(user.Id, user.Email, user.PasswordHash, user.Role, user.IsActive, user.Version);
         return await unit.ExecuteInTransactionAsync(async transactionCt =>
         {
-            var passwordChange = user.ChangePasswordHash(hasher.Hash(command.NewPassword));
+            var passwordChange = updatedUser.ChangePasswordHash(hasher.Hash(command.NewPassword));
             if (passwordChange.IsFailure) return new TransactionOutcome<ApplicationResult>(ApplicationResult.Failure(passwordChange.ErrorCode == Aegis.Domain.Results.DomainErrorCode.InvalidPasswordHash ? ApplicationErrorCode.InvalidPasswordHash : ApplicationErrorCode.InvalidRequest), TransactionDecision.Rollback);
             var revoked = await sessions.RevokeAllByUserIdAtomicallyAsync(id, clock.UtcNow, SessionRevocationReason.PasswordChanged, transactionCt);
             if (!revoked.IsSuccess && revoked.Code != SessionOperationCode.NotFound) return new TransactionOutcome<ApplicationResult>(ApplicationResult.Failure(AuthRules.Map(revoked)), TransactionDecision.Rollback);
-            var updated = await users.UpdateAtomicallyAsync(user, expected, transactionCt);
+            var updated = await users.UpdateAtomicallyAsync(updatedUser, expected, transactionCt);
             if (!updated.IsSuccess) return new TransactionOutcome<ApplicationResult>(ApplicationResult.Failure(updated.Code switch
             {
                 UserUpdateCode.NotFound => ApplicationErrorCode.UserNotFound,

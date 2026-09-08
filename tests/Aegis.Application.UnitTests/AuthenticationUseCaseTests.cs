@@ -197,7 +197,7 @@ public sealed class AuthenticationUseCaseTests
         var id = Guid.NewGuid(); var user = User.Rehydrate(id, Email.Create("change@a.com").Value!, "hash:current-password", UserRole.User, true, 1);
         var users = new FakeUsers(); users.Added.Add(user); var unit = new FakeUnit();
         var result = await new ChangePasswordUseCase(users, new FakeSessions(), new FakeContext(id), new FakeHasher(), new FakeClock(), unit).ExecuteAsync(new("current-password", "new-password-ok"));
-        Assert.True(result.IsSuccess); Assert.Equal("hash:new-password-ok", user.PasswordHash); Assert.Equal(2, user.Version); Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
+        Assert.True(result.IsSuccess); Assert.Equal("hash:current-password", user.PasswordHash); Assert.Equal(1, user.Version); Assert.Equal("hash:new-password-ok", users.Updated!.PasswordHash); Assert.Equal(2, users.Updated.Version); Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
     }
 
     [Fact]
@@ -206,7 +206,16 @@ public sealed class AuthenticationUseCaseTests
         var id = Guid.NewGuid(); var user = User.Rehydrate(id, Email.Create("rollback@a.com").Value!, "hash:current-password", UserRole.User, true, 1);
         var users = new FakeUsers(); users.Added.Add(user); var unit = new FakeUnit();
         var result = await new ChangePasswordUseCase(users, new FakeSessions { RevokeAllCode = SessionOperationCode.DomainFailure }, new FakeContext(id), new FakeHasher(), new FakeClock(), unit).ExecuteAsync(new("current-password", "new-password-ok"));
-        Assert.False(result.IsSuccess); Assert.Equal(TransactionDecision.Rollback, unit.Decisions.Single());
+        Assert.False(result.IsSuccess); Assert.Equal("hash:current-password", user.PasswordHash); Assert.Equal(1, user.Version); Assert.Equal(TransactionDecision.Rollback, unit.Decisions.Single());
+    }
+
+    [Fact]
+    public async Task ChangePassword_update_concurrency_conflict_rolls_back_without_mutating_loaded_user()
+    {
+        var id = Guid.NewGuid(); var user = User.Rehydrate(id, Email.Create("conflict@a.com").Value!, "hash:current-password", UserRole.User, true, 4);
+        var users = new FakeUsers { UpdateCode = UserUpdateCode.ConcurrencyConflict }; users.Added.Add(user); var unit = new FakeUnit();
+        var result = await new ChangePasswordUseCase(users, new FakeSessions(), new FakeContext(id), new FakeHasher(), new FakeClock(), unit).ExecuteAsync(new("current-password", "new-password-ok"));
+        Assert.Equal(ApplicationErrorCode.ConcurrencyConflict, result.ErrorCode); Assert.Equal("hash:current-password", user.PasswordHash); Assert.Equal(4, user.Version); Assert.Equal(TransactionDecision.Rollback, unit.Decisions.Single());
     }
 
     private static Session NewSession(DateTimeOffset now, string hash)
@@ -226,6 +235,8 @@ public sealed class AuthenticationUseCaseTests
     {
         public List<User> Added { get; } = [];
         public UserInsertCode InsertCode { get; init; } = UserInsertCode.Succeeded;
+        public UserUpdateCode UpdateCode { get; init; } = UserUpdateCode.Succeeded;
+        public User? Updated { get; private set; }
         public FakeUsers() : this(null) { }
         public FakeUsers(Guid userId) : this((Guid?)userId) { }
         private void EnsureUser()
@@ -237,7 +248,7 @@ public sealed class AuthenticationUseCaseTests
         public Task<User?> GetByEmailAsync(Email email, CancellationToken cancellationToken = default) => Task.FromResult<User?>(Added.FirstOrDefault(x => x.Email == email));
         public Task AddAsync(User user, CancellationToken cancellationToken = default) { Added.Add(user); return Task.CompletedTask; }
         public Task<UserInsertResult> AddIfNotExistsAtomicallyAsync(User user, CancellationToken cancellationToken = default) { if (InsertCode == UserInsertCode.Succeeded) Added.Add(user); return Task.FromResult(new UserInsertResult(InsertCode)); }
-        public Task<UserUpdateResult> UpdateAtomicallyAsync(User user, long expectedVersion, CancellationToken cancellationToken = default) => Task.FromResult(new UserUpdateResult(UserUpdateCode.Succeeded));
+        public Task<UserUpdateResult> UpdateAtomicallyAsync(User user, long expectedVersion, CancellationToken cancellationToken = default) { Updated = user; return Task.FromResult(new UserUpdateResult(UpdateCode)); }
     }
     private sealed class FakeSessions : ISessionRepository
     {
