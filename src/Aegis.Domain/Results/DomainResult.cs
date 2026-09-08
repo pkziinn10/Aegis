@@ -4,6 +4,7 @@ public enum DomainErrorCode
 {
     None = 0,
     InvalidEmail,
+    InvalidPasswordHash,
     InvalidRole,
     InvalidRefreshToken,
     RefreshTokenExpired,
