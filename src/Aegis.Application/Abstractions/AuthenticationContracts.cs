@@ -30,6 +30,10 @@ public interface IUnitOfWork
 public enum TransactionDecision { Commit, Rollback }
 public sealed record TransactionOutcome<T>(T Result, TransactionDecision Decision);
 public interface ICurrentUserContext { Guid? UserId { get; } }
+public interface IAuditWriter
+{
+    Task WriteAsync(string action, Guid? userId, IReadOnlyDictionary<string, string?>? metadata = null, CancellationToken cancellationToken = default);
+}
 
 public sealed class AccessToken
 {

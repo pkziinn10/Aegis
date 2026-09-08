@@ -78,7 +78,7 @@ public sealed class RegisterUseCase(IUserRepository users, ISessionRepository se
     }
 }
 
-public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessions, IPasswordHasher hasher, IAccessTokenIssuer issuer, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit)
+public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessions, IPasswordHasher hasher, IAccessTokenIssuer issuer, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit, IAuditWriter? audit = null)
 {
     public async Task<ApplicationResult<LoginResult>> ExecuteAsync(LoginCommand command, CancellationToken ct = default)
     {
@@ -96,13 +96,14 @@ public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessi
             if (!creation.IsSuccess)
                 return new TransactionOutcome<ApplicationResult<LoginResult>>(
                     ApplicationResult<LoginResult>.Failure(AuthRules.Map(creation)), TransactionDecision.Rollback);
+            if (audit is not null) await audit.WriteAsync("login", user.Id, new Dictionary<string, string?> { ["result"] = "success" }, transactionCt);
             return new TransactionOutcome<ApplicationResult<LoginResult>>(
                 ApplicationResult<LoginResult>.Success(new(AuthRules.Dto(user), new(access, material.Value))), TransactionDecision.Commit);
         }, ct);
     }
 }
 
-public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFactory factory, IAccessTokenIssuer issuer, IUserRepository users, IClock clock, IUnitOfWork unit)
+public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFactory factory, IAccessTokenIssuer issuer, IUserRepository users, IClock clock, IUnitOfWork unit, IAuditWriter? audit = null)
 {
     public async Task<ApplicationResult<TokenResult>> ExecuteAsync(RefreshCommand command, CancellationToken ct = default)
     {
@@ -119,6 +120,7 @@ public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFac
             {
                 var decision = rotation.Code == SessionRotationCode.RefreshTokenReuse
                     ? TransactionDecision.Commit : TransactionDecision.Rollback;
+                if (rotation.Code == SessionRotationCode.RefreshTokenReuse && audit is not null) await audit.WriteAsync("refresh_token_reuse", session.UserId, new Dictionary<string, string?> { ["result"] = "family_revoked" }, transactionCt);
                 return new TransactionOutcome<ApplicationResult<TokenResult>>(ApplicationResult<TokenResult>.Failure(AuthRules.Map(rotation)), decision);
             }
 
@@ -136,13 +138,14 @@ public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFac
             }
 
             var access = issuer.Issue(user.Id, user.Role, now);
+            if (audit is not null) await audit.WriteAsync("refresh_rotation", user.Id, new Dictionary<string, string?> { ["result"] = "success", ["sessionId"] = session.Id.ToString("N") }, transactionCt);
             return new TransactionOutcome<ApplicationResult<TokenResult>>(
                 ApplicationResult<TokenResult>.Success(new(access, replacement.Value)), TransactionDecision.Commit);
         }, ct);
     }
 }
 
-public sealed class LogoutUseCase(ISessionRepository sessions, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit)
+public sealed class LogoutUseCase(ISessionRepository sessions, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit, ICurrentUserContext? context = null, IAuditWriter? audit = null)
 {
     public async Task<ApplicationResult> ExecuteAsync(LogoutCommand command, CancellationToken ct = default)
     {
@@ -153,6 +156,7 @@ public sealed class LogoutUseCase(ISessionRepository sessions, IRefreshTokenFact
             var operation = await sessions.RevokeByRefreshTokenHashAtomicallyAsync(
                 factory.Hash(command.RefreshToken), now, SessionRevocationReason.Manual, transactionCt);
             var success = operation.IsSuccess || operation.Code == SessionOperationCode.NotFound;
+            if (success && audit is not null) await audit.WriteAsync("logout", context?.UserId, new Dictionary<string, string?> { ["result"] = "success" }, transactionCt);
             return new TransactionOutcome<ApplicationResult>(
                 success ? ApplicationResult.Success() : ApplicationResult.Failure(AuthRules.Map(operation)),
                 success ? TransactionDecision.Commit : TransactionDecision.Rollback);
@@ -171,7 +175,7 @@ public sealed class GetMeUseCase(IUserRepository users, ICurrentUserContext cont
     }
 }
 
-public sealed class ChangePasswordUseCase(IUserRepository users, ISessionRepository sessions, ICurrentUserContext context, IPasswordHasher hasher, IClock clock, IUnitOfWork unit)
+public sealed class ChangePasswordUseCase(IUserRepository users, ISessionRepository sessions, ICurrentUserContext context, IPasswordHasher hasher, IClock clock, IUnitOfWork unit, IAuditWriter? audit = null)
 {
     public async Task<ApplicationResult> ExecuteAsync(ChangePasswordCommand command, CancellationToken ct = default)
     {
@@ -197,6 +201,7 @@ public sealed class ChangePasswordUseCase(IUserRepository users, ISessionReposit
                 UserUpdateCode.Succeeded => ApplicationErrorCode.None,
                 _ => ApplicationErrorCode.InvalidRequest
             }), TransactionDecision.Rollback);
+            if (audit is not null) await audit.WriteAsync("password_change", id, new Dictionary<string, string?> { ["result"] = "success" }, transactionCt);
             return new TransactionOutcome<ApplicationResult>(ApplicationResult.Success(), TransactionDecision.Commit);
         }, ct);
     }

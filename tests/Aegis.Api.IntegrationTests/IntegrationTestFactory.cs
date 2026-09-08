@@ -82,6 +82,7 @@ public static class TestSettings
 
     public static Dictionary<string, string?> Valid(string? secret = null) => new()
     {
+        ["ConnectionStrings:Aegis"] = "Host=localhost;Port=55432;Database=aegis;Username=aegis;Password=aegis-test",
         ["Jwt:SecretKey"] = secret ?? Secret,
         ["Jwt:Algorithm"] = "HS256",
         ["Jwt:Issuer"] = "Aegis.Api",
