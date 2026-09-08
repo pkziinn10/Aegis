@@ -17,6 +17,7 @@ public sealed class IntegrationTestFactory : WebApplicationFactory<Program>
         string environment = "Development")
     {
         EnvironmentName = environment;
+        PostgresContainerFixture.Current.ResetDatabaseAsync().GetAwaiter().GetResult();
         _settings = settings ?? TestSettings.Valid();
         foreach (var setting in _settings)
         {
@@ -82,7 +83,7 @@ public static class TestSettings
 
     public static Dictionary<string, string?> Valid(string? secret = null) => new()
     {
-        ["ConnectionStrings:Aegis"] = "Host=localhost;Port=55432;Database=aegis;Username=aegis;Password=aegis-test",
+        ["ConnectionStrings:Aegis"] = PostgresContainerFixture.Current.ConnectionString,
         ["Jwt:SecretKey"] = secret ?? Secret,
         ["Jwt:Algorithm"] = "HS256",
         ["Jwt:Issuer"] = "Aegis.Api",

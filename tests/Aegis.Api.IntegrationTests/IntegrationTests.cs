@@ -12,9 +12,11 @@ using Microsoft.AspNetCore.HttpsPolicy;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
 
 namespace Aegis.Api.IntegrationTests;
 
+[Collection("Postgres")]
 public sealed class StartupConfigurationTests
 {
     [Theory]
@@ -75,6 +77,7 @@ public sealed class StartupConfigurationTests
     }
 }
 
+[Collection("Postgres")]
 public sealed class JwtIntegrationTests
 {
     [Fact]
@@ -160,6 +163,7 @@ public sealed class JwtIntegrationTests
 
 }
 
+[Collection("Postgres")]
 public sealed class WebSecurityIntegrationTests
 {
     [Fact]
@@ -288,6 +292,7 @@ public sealed class WebSecurityIntegrationTests
     }
 }
 
+[Collection("Postgres")]
 public sealed class RateLimitIntegrationTests
 {
     [Fact]
@@ -331,6 +336,7 @@ public sealed class RateLimitIntegrationTests
     }
 }
 
+[Collection("Postgres")]
 public sealed class IdentityApiIntegrationTests
 {
     [Fact]
@@ -491,6 +497,7 @@ public sealed class IdentityApiIntegrationTests
 
 public sealed record RateLimitProblem(string Title, int Status);
 
+[Collection("Postgres")]
 public sealed class AuthenticationFlowIntegrationTests
 {
     [Fact]
@@ -578,6 +585,73 @@ public sealed class AuthenticationFlowIntegrationTests
         Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);
         Assert.False(string.IsNullOrWhiteSpace(refreshedBody.GetProperty("refreshToken").GetString()));
         Assert.DoesNotContain("__Host-refresh-token", refreshed.Headers.SelectMany(x => x.Value));
+
+        using var reused = new HttpRequestMessage(HttpMethod.Post, "/auth/token/refresh")
+        {
+            Content = JsonContent.Create(new { refreshToken = loginRefresh })
+        };
+        var reuseResponse = await client.SendAsync(reused);
+        Assert.Equal(HttpStatusCode.Unauthorized, reuseResponse.StatusCode);
+        AssertProblem(reuseResponse, "RefreshTokenReuse", 401);
+
+        await using var db = PostgresContainerFixture.Current.CreateDbContext();
+        var session = await db.Sessions.Include(x => x.RefreshTokens)
+            .SingleAsync(x => x.RefreshTokens.Any(t => t.Hash == Hash(loginRefresh!)));
+        Assert.NotNull(session.RevokedAt);
+        Assert.Equal((int)Aegis.Domain.Enums.SessionRevocationReason.RefreshTokenReuse, session.RevocationReason);
+        Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));
+    }
+
+    [Fact]
+    public async Task Token_logout_revokes_refresh_and_persists_manual_reason()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        var email = $"token-logout-{Guid.NewGuid():N}@example.com";
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email);
+        var registered = await client.SendAsync(register);
+        var refreshToken = JsonDocument.Parse(await registered.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("refreshToken").GetString()!;
+
+        using var logout = new HttpRequestMessage(HttpMethod.Post, "/auth/token/logout")
+        {
+            Content = JsonContent.Create(new { refreshToken })
+        };
+        Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(logout)).StatusCode);
+
+        using var refresh = new HttpRequestMessage(HttpMethod.Post, "/auth/token/refresh")
+        {
+            Content = JsonContent.Create(new { refreshToken })
+        };
+        var rejected = await client.SendAsync(refresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
+        AssertProblem(rejected, "SessionRevoked", 401);
+
+        await using var db = PostgresContainerFixture.Current.CreateDbContext();
+        var session = await db.Sessions.Include(x => x.RefreshTokens)
+            .SingleAsync(x => x.RefreshTokens.Any(t => t.Hash == Hash(refreshToken)));
+        Assert.NotNull(session.RevokedAt);
+        Assert.Equal((int)Aegis.Domain.Enums.SessionRevocationReason.Manual, session.RevocationReason);
+        Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));
+    }
+
+    [Fact]
+    public async Task Me_returns_registered_user_with_real_access_token()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        var email = $"me-{Guid.NewGuid():N}@example.com";
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email);
+        var registered = await client.SendAsync(register);
+        var body = JsonDocument.Parse(await registered.Content.ReadAsStringAsync()).RootElement;
+        var accessToken = body.GetProperty("accessToken").GetString()!;
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        var response = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var me = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(email, me.GetProperty("email").GetString());
+        Assert.Equal("User", me.GetProperty("role").GetString());
     }
 
     private static HttpRequestMessage Credentials(HttpMethod method, string path, string email, string password = "password-123456") => new(method, path)
@@ -590,6 +664,17 @@ public sealed class AuthenticationFlowIntegrationTests
             .Select(value => value.Split(';', 2)[0])
             .Single(value => value.StartsWith(name + "=", StringComparison.Ordinal))
             .Substring(name.Length + 1);
+
+    private static string Hash(string token) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
+
+    private static void AssertProblem(HttpResponseMessage response, string code, int status)
+    {
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        var body = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult()).RootElement;
+        Assert.Equal(status, body.GetProperty("status").GetInt32());
+        Assert.Equal(code, body.GetProperty("code").GetString());
+    }
 
     private static void AssertCookie(HttpResponseMessage response, string name, bool httpOnly)
     {

@@ -253,6 +253,39 @@ public sealed class AuthenticationUseCaseTests
         Assert.Equal(ApplicationErrorCode.ConcurrencyConflict, result.ErrorCode); Assert.Equal("hash:current-password", user.PasswordHash); Assert.Equal(4, user.Version); Assert.Equal(TransactionDecision.Rollback, unit.Decisions.Single());
     }
 
+    [Fact]
+    public async Task DeactivateUser_deactivates_user_and_revokes_all_sessions_atomically()
+    {
+        var id = Guid.NewGuid();
+        var user = User.Rehydrate(id, Email.Create("deactivate@a.com").Value!, "hash", UserRole.User, true, 4);
+        var users = new FakeUsers(); users.Added.Add(user);
+        var sessions = new FakeSessions();
+        var unit = new FakeUnit();
+
+        var result = await new DeactivateUserUseCase(users, sessions, new FakeContext(id), new FakeClock(), unit).ExecuteAsync();
+
+        Assert.True(result.IsSuccess);
+        Assert.False(users.Updated!.IsActive);
+        Assert.Equal(1, sessions.RevokeAllCalls);
+        Assert.Equal(SessionRevocationReason.UserDeactivated, sessions.LastRevocationReason);
+        Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
+    }
+
+    [Fact]
+    public async Task DeactivateUser_rolls_back_when_session_revocation_fails()
+    {
+        var id = Guid.NewGuid();
+        var user = User.Rehydrate(id, Email.Create("deactivate-fail@a.com").Value!, "hash", UserRole.User, true, 1);
+        var users = new FakeUsers(); users.Added.Add(user);
+        var unit = new FakeUnit();
+
+        var result = await new DeactivateUserUseCase(users, new FakeSessions { RevokeAllCode = SessionOperationCode.DomainFailure }, new FakeContext(id), new FakeClock(), unit).ExecuteAsync();
+
+        Assert.Equal(ApplicationErrorCode.InvalidRefreshToken, result.ErrorCode);
+        Assert.Null(users.Updated);
+        Assert.Equal(TransactionDecision.Rollback, unit.Decisions.Single());
+    }
+
     private static Session NewSession(DateTimeOffset now, string hash)
     {
         var id = Guid.NewGuid(); var userId = Guid.NewGuid();
@@ -297,6 +330,7 @@ public sealed class AuthenticationUseCaseTests
         public int LoadCalls { get; private set; }
         public int RevokeCasCalls { get; private set; }
         public int RevokeAllCalls { get; private set; }
+        public SessionRevocationReason? LastRevocationReason { get; private set; }
         public Task<Session?> GetByRefreshTokenHashWithHistoryAsync(string refreshTokenHash, CancellationToken cancellationToken = default) { LoadCalls++; return Task.FromResult(Session); }
         public Task AddAsync(Session session, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<SessionCreationResult> AddIfUserActiveAtomicallyAsync(Session session, long expectedUserVersion, CancellationToken cancellationToken = default) { ExpectedUserVersion = expectedUserVersion; StoredHash = session.RefreshTokens.Single().Hash; return Task.FromResult(new SessionCreationResult(CreationCode)); }
@@ -307,7 +341,7 @@ public sealed class AuthenticationUseCaseTests
             return Task.FromResult(result.IsSuccess ? new SessionRotationResult(SessionRotationCode.Succeeded) : new SessionRotationResult(result.ErrorCode == DomainErrorCode.RefreshTokenReuse ? SessionRotationCode.RefreshTokenReuse : SessionRotationCode.DomainFailure, result));
         }
         public Task<SessionOperationResult> RevokeAndPersistAtomicallyAsync(Guid sessionId, DateTimeOffset now, SessionRevocationReason reason, long expectedVersion, CancellationToken cancellationToken = default) { RevokeCasCalls++; return Task.FromResult(new SessionOperationResult(SessionOperationCode.NotFound)); }
-        public Task<SessionOperationResult> RevokeAllByUserIdAtomicallyAsync(Guid userId, DateTimeOffset now, SessionRevocationReason reason, CancellationToken cancellationToken = default) { RevokeAllCalls++; return Task.FromResult(new SessionOperationResult(RevokeAllCode)); }
+        public Task<SessionOperationResult> RevokeAllByUserIdAtomicallyAsync(Guid userId, DateTimeOffset now, SessionRevocationReason reason, CancellationToken cancellationToken = default) { RevokeAllCalls++; LastRevocationReason = reason; return Task.FromResult(new SessionOperationResult(RevokeAllCode)); }
         public Task<SessionOperationResult> RevokeByRefreshTokenHashAtomicallyAsync(string presentedHash, DateTimeOffset now, SessionRevocationReason reason, CancellationToken cancellationToken = default) { RevokeByHashCalls++; RevokedHash = presentedHash; return Task.FromResult(new SessionOperationResult(SessionOperationCode.Succeeded)); }
     }
 }

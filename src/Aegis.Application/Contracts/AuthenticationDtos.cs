@@ -23,6 +23,7 @@ public sealed record ChangePasswordCommand(string CurrentPassword, string NewPas
 {
     public override string ToString() => "ChangePasswordCommand(CurrentPassword=[REDACTED], NewPassword=[REDACTED])";
 }
+public sealed record DeactivateUserCommand;
 public sealed record UserDto(Guid Id, string Email, UserRole Role);
 public sealed record RefreshTokenDto(string Value)
 {

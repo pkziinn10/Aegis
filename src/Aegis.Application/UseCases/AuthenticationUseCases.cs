@@ -217,3 +217,38 @@ public sealed class ChangePasswordUseCase(IUserRepository users, ISessionReposit
         }, ct);
     }
 }
+
+public sealed class DeactivateUserUseCase(IUserRepository users, ISessionRepository sessions, ICurrentUserContext context, IClock clock, IUnitOfWork unit, IAuditWriter? audit = null)
+{
+    public async Task<ApplicationResult> ExecuteAsync(DeactivateUserCommand? command = null, CancellationToken ct = default)
+    {
+        if (context.UserId is not Guid id) return ApplicationResult.Failure(ApplicationErrorCode.Unauthorized);
+        var user = await users.GetByIdAsync(id, ct);
+        if (user is null) return ApplicationResult.Failure(ApplicationErrorCode.UserNotFound);
+        if (!user.IsActive) return ApplicationResult.Failure(ApplicationErrorCode.InactiveUser);
+
+        var expected = user.Version;
+        var deactivatedUser = User.Rehydrate(user.Id, user.Email, user.PasswordHash, user.Role, user.IsActive, user.Version);
+        deactivatedUser.Deactivate();
+
+        return await unit.ExecuteInTransactionAsync(async transactionCt =>
+        {
+            var revoked = await sessions.RevokeAllByUserIdAtomicallyAsync(id, clock.UtcNow, SessionRevocationReason.UserDeactivated, transactionCt);
+            if (!revoked.IsSuccess && revoked.Code != SessionOperationCode.NotFound)
+                return new TransactionOutcome<ApplicationResult>(ApplicationResult.Failure(AuthRules.Map(revoked)), TransactionDecision.Rollback);
+
+            var updated = await users.UpdateAtomicallyAsync(deactivatedUser, expected, transactionCt);
+            if (!updated.IsSuccess)
+                return new TransactionOutcome<ApplicationResult>(ApplicationResult.Failure(updated.Code switch
+                {
+                    UserUpdateCode.NotFound => ApplicationErrorCode.UserNotFound,
+                    UserUpdateCode.ConcurrencyConflict => ApplicationErrorCode.ConcurrencyConflict,
+                    UserUpdateCode.Succeeded => ApplicationErrorCode.None,
+                    _ => ApplicationErrorCode.InvalidRequest
+                }), TransactionDecision.Rollback);
+
+            if (audit is not null) await audit.WriteAsync("user_deactivation", id, new Dictionary<string, string?> { ["result"] = "success" }, transactionCt);
+            return new TransactionOutcome<ApplicationResult>(ApplicationResult.Success(), TransactionDecision.Commit);
+        }, ct);
+    }
+}

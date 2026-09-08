@@ -9,9 +9,13 @@ using Npgsql;
 
 namespace Aegis.Infrastructure.IntegrationTests;
 
-public sealed class PostgresInfrastructureTests
+[Collection("Postgres")]
+public sealed class PostgresInfrastructureTests : IClassFixture<PostgresContainerFixture>
 {
-    private const string Connection = "Host=localhost;Port=55432;Database=aegis;Username=aegis;Password=aegis-test";
+    private readonly PostgresContainerFixture _fixture;
+    private string Connection => _fixture.ConnectionString;
+
+    public PostgresInfrastructureTests(PostgresContainerFixture fixture) => _fixture = fixture;
 
     [Fact]
     public async Task Migration_creates_fk_indexes_and_partial_active_refresh_constraint()
@@ -100,13 +104,13 @@ public sealed class PostgresInfrastructureTests
         await using var verify = Create(); var persisted = await verify.Sessions.Include(x => x.RefreshTokens).SingleOrDefaultAsync(x => x.Id == sessionId); Assert.True(createResult.IsSuccess); Assert.True(revokeResult.IsSuccess); if (persisted?.RevokedAt is not null) Assert.All(persisted.RefreshTokens, x => Assert.NotNull(x.RevokedAt)); else if (persisted is not null) Assert.All(persisted.RefreshTokens, x => Assert.Null(x.RevokedAt));
     }
 
-    private static async Task<Aegis.Domain.Repositories.SessionRotationResult> Rotate(Guid id, string hash, string replacementHash, DateTimeOffset now)
+    private async Task<Aegis.Domain.Repositories.SessionRotationResult> Rotate(Guid id, string hash, string replacementHash, DateTimeOffset now)
     {
         await using var db = Create(); var repo = new SessionRepository(db, new TransactionRunner(db));
         var replacement = new RefreshToken(Guid.NewGuid(), id, replacementHash, now, now.AddMinutes(30));
         return await repo.RotateAndPersistAtomicallyAsync(id, hash, replacement, now, 1);
     }
-    private static async Task<Aegis.Domain.Repositories.SessionOperationResult> Revoke(string hash, DateTimeOffset now) { await using var db = Create(); return await new SessionRepository(db, new TransactionRunner(db)).RevokeByRefreshTokenHashAtomicallyAsync(hash, now, SessionRevocationReason.Manual); }
-    private static AegisDbContext Create() => new(new DbContextOptionsBuilder<AegisDbContext>().UseNpgsql(Connection).Options);
-    private static async Task<Aegis.Domain.Repositories.UserInsertResult> Insert(Email email) { await using var db = Create(); return await new UserRepository(db, new TransactionRunner(db)).AddIfNotExistsAtomicallyAsync(new User(Guid.NewGuid(), email, "hash")); }
+    private async Task<Aegis.Domain.Repositories.SessionOperationResult> Revoke(string hash, DateTimeOffset now) { await using var db = Create(); return await new SessionRepository(db, new TransactionRunner(db)).RevokeByRefreshTokenHashAtomicallyAsync(hash, now, SessionRevocationReason.Manual); }
+    private AegisDbContext Create() => _fixture.CreateDbContext();
+    private async Task<Aegis.Domain.Repositories.UserInsertResult> Insert(Email email) { await using var db = Create(); return await new UserRepository(db, new TransactionRunner(db)).AddIfNotExistsAtomicallyAsync(new User(Guid.NewGuid(), email, "hash")); }
 }
