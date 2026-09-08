@@ -17,7 +17,7 @@ public sealed class AuthenticationUseCaseTests
     public async Task Register_rejects_password_shorter_than_twelve_characters()
     {
         var users = new FakeUsers();
-        var result = await new RegisterUseCase(users, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("a@b.com", "short"));
+        var result = await new RegisterUseCase(users, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit(), new RefreshTokenPolicy(7)).ExecuteAsync(new("a@b.com", "short"));
         Assert.Equal(ApplicationErrorCode.WeakPassword, result.ErrorCode);
         Assert.Empty(users.Added);
     }
@@ -39,7 +39,7 @@ public sealed class AuthenticationUseCaseTests
     [Fact]
     public async Task Login_missing_user_uses_dummy_verification_and_returns_invalid_credentials()
     {
-        var result = await new LoginUseCase(new FakeUsers(), new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("missing@a.com", "password-password"));
+        var result = await new LoginUseCase(new FakeUsers(), new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit(), new RefreshTokenPolicy(7)).ExecuteAsync(new("missing@a.com", "password-password"));
         Assert.Equal(ApplicationErrorCode.InvalidCredentials, result.ErrorCode);
     }
 
@@ -48,7 +48,7 @@ public sealed class AuthenticationUseCaseTests
     {
         var users = new FakeUsers();
         users.Added.Add(User.Rehydrate(Guid.NewGuid(), Email.Create("inactive@a.com").Value!, "hash:password-password", UserRole.User, false, 1));
-        var result = await new LoginUseCase(users, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("inactive@a.com", "password-password"));
+        var result = await new LoginUseCase(users, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit(), new RefreshTokenPolicy(7)).ExecuteAsync(new("inactive@a.com", "password-password"));
         Assert.Equal(ApplicationErrorCode.InvalidCredentials, result.ErrorCode);
     }
 
@@ -74,7 +74,7 @@ public sealed class AuthenticationUseCaseTests
     public async Task Register_maps_atomic_duplicate_email()
     {
         var users = new FakeUsers { InsertCode = UserInsertCode.DuplicateEmail };
-        var result = await new RegisterUseCase(users, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("duplicate@a.com", "password-password"));
+        var result = await new RegisterUseCase(users, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit(), new RefreshTokenPolicy(7)).ExecuteAsync(new("duplicate@a.com", "password-password"));
         Assert.Equal(ApplicationErrorCode.EmailAlreadyRegistered, result.ErrorCode);
         Assert.Empty(users.Added);
     }
@@ -83,7 +83,7 @@ public sealed class AuthenticationUseCaseTests
     public async Task Register_commits_after_atomic_insert_and_session_creation()
     {
         var unit = new FakeUnit();
-        var result = await new RegisterUseCase(new FakeUsers(), new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), unit).ExecuteAsync(new("new@a.com", "password-password"));
+        var result = await new RegisterUseCase(new FakeUsers(), new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new("new@a.com", "password-password"));
         Assert.True(result.IsSuccess);
         Assert.Equal([TransactionDecision.Commit], unit.Decisions);
     }
@@ -92,7 +92,7 @@ public sealed class AuthenticationUseCaseTests
     public async Task Register_duplicate_rolls_back_transaction()
     {
         var unit = new FakeUnit();
-        var result = await new RegisterUseCase(new FakeUsers { InsertCode = UserInsertCode.DuplicateEmail }, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), unit).ExecuteAsync(new("duplicate@a.com", "password-password"));
+        var result = await new RegisterUseCase(new FakeUsers { InsertCode = UserInsertCode.DuplicateEmail }, new FakeSessions(), new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new("duplicate@a.com", "password-password"));
         Assert.False(result.IsSuccess);
         Assert.Equal([TransactionDecision.Rollback], unit.Decisions);
     }
@@ -124,7 +124,7 @@ public sealed class AuthenticationUseCaseTests
         var user = User.Rehydrate(Guid.NewGuid(), Email.Create("login@a.com").Value!, "hash:password-password", UserRole.User, true, 7);
         var users = new FakeUsers(); users.Added.Add(user);
         var sessions = new FakeSessions();
-        var result = await new LoginUseCase(users, sessions, new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit()).ExecuteAsync(new("login@a.com", "password-password"));
+        var result = await new LoginUseCase(users, sessions, new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), new FakeUnit(), new RefreshTokenPolicy(7)).ExecuteAsync(new("login@a.com", "password-password"));
         Assert.True(result.IsSuccess);
         Assert.Equal(7, sessions.ExpectedUserVersion);
         Assert.Equal("refresh-hash", sessions.StoredHash);
@@ -137,7 +137,7 @@ public sealed class AuthenticationUseCaseTests
         var users = new FakeUsers(); users.Added.Add(user);
         var sessions = new FakeSessions { CreationCode = SessionCreationCode.ConcurrencyConflict };
         var unit = new FakeUnit();
-        var result = await new LoginUseCase(users, sessions, new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), unit).ExecuteAsync(new("race@a.com", "password-password"));
+        var result = await new LoginUseCase(users, sessions, new FakeHasher(), new FakeIssuer(), new FakeRefresh(), new FakeClock(), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new("race@a.com", "password-password"));
         Assert.Equal(ApplicationErrorCode.ConcurrencyConflict, result.ErrorCode);
         Assert.Equal([TransactionDecision.Rollback], unit.Decisions);
     }
@@ -161,7 +161,7 @@ public sealed class AuthenticationUseCaseTests
         var session = NewSession(now, "old-hash");
         var sessions = new FakeSessions { Session = session };
         var unit = new FakeUnit();
-        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "new-token", "new-hash"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit).ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "new-token", "new-hash"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
         Assert.True(result.IsSuccess);
         Assert.Equal(2, session.Version);
         Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
@@ -175,10 +175,42 @@ public sealed class AuthenticationUseCaseTests
         session.Rotate("old-hash", new RefreshToken(Guid.NewGuid(), session.Id, "replacement", now, now.AddDays(1)), now);
         var sessions = new FakeSessions { Session = session };
         var unit = new FakeUnit();
-        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "replacement-token", "replacement"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit).ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "replacement-token", "replacement"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), unit, new RefreshTokenPolicy(7)).ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
         Assert.Equal(ApplicationErrorCode.RefreshTokenReuse, result.ErrorCode);
         Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
         Assert.True(session.IsRevoked);
+    }
+
+    [Fact]
+    public async Task Refresh_inactive_user_does_not_rotate_and_commits_session_revocation()
+    {
+        var now = new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var session = NewSession(now, "old-hash");
+        var sessions = new FakeSessions { Session = session };
+        var users = new FakeUsers();
+        users.Added.Add(User.Rehydrate(session.UserId, Email.Create("inactive-refresh@a.com").Value!, "hash", UserRole.User, false, 1));
+        var unit = new FakeUnit();
+
+        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash"), new FakeIssuer(), users, new FakeClock(now), unit, new RefreshTokenPolicy(2))
+            .ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+
+        Assert.Equal(ApplicationErrorCode.InvalidCredentials, result.ErrorCode);
+        Assert.Equal(1, sessions.RevokeAllCalls);
+        Assert.Equal(1, session.Version);
+        Assert.Equal(TransactionDecision.Commit, unit.Decisions.Single());
+    }
+
+    [Fact]
+    public async Task Refresh_policy_limits_replacement_expiration_to_configured_days()
+    {
+        var now = new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var session = NewSession(now, "old-hash");
+        var sessions = new FakeSessions { Session = session };
+        var result = await new RefreshUseCase(sessions, new FakeRefresh("old-hash", "new-token", "new-hash"), new FakeIssuer(), new FakeUsers(session.UserId), new FakeClock(now), new FakeUnit(), new RefreshTokenPolicy(2))
+            .ExecuteAsync(new(new RefreshTokenValue("old-token", now.AddDays(1))));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(now.AddDays(2), result.Value!.RefreshToken.ExpiresAt);
     }
 
     [Fact]
@@ -261,6 +293,7 @@ public sealed class AuthenticationUseCaseTests
         public int RevokeByHashCalls { get; private set; }
         public int LoadCalls { get; private set; }
         public int RevokeCasCalls { get; private set; }
+        public int RevokeAllCalls { get; private set; }
         public Task<Session?> GetByRefreshTokenHashWithHistoryAsync(string refreshTokenHash, CancellationToken cancellationToken = default) { LoadCalls++; return Task.FromResult(Session); }
         public Task AddAsync(Session session, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<SessionCreationResult> AddIfUserActiveAtomicallyAsync(Session session, long expectedUserVersion, CancellationToken cancellationToken = default) { ExpectedUserVersion = expectedUserVersion; StoredHash = session.RefreshTokens.Single().Hash; return Task.FromResult(new SessionCreationResult(CreationCode)); }
@@ -271,7 +304,7 @@ public sealed class AuthenticationUseCaseTests
             return Task.FromResult(result.IsSuccess ? new SessionRotationResult(SessionRotationCode.Succeeded) : new SessionRotationResult(result.ErrorCode == DomainErrorCode.RefreshTokenReuse ? SessionRotationCode.RefreshTokenReuse : SessionRotationCode.DomainFailure, result));
         }
         public Task<SessionOperationResult> RevokeAndPersistAtomicallyAsync(Guid sessionId, DateTimeOffset now, SessionRevocationReason reason, long expectedVersion, CancellationToken cancellationToken = default) { RevokeCasCalls++; return Task.FromResult(new SessionOperationResult(SessionOperationCode.NotFound)); }
-        public Task<SessionOperationResult> RevokeAllByUserIdAtomicallyAsync(Guid userId, DateTimeOffset now, SessionRevocationReason reason, CancellationToken cancellationToken = default) => Task.FromResult(new SessionOperationResult(RevokeAllCode));
+        public Task<SessionOperationResult> RevokeAllByUserIdAtomicallyAsync(Guid userId, DateTimeOffset now, SessionRevocationReason reason, CancellationToken cancellationToken = default) { RevokeAllCalls++; return Task.FromResult(new SessionOperationResult(RevokeAllCode)); }
         public Task<SessionOperationResult> RevokeByRefreshTokenHashAtomicallyAsync(string presentedHash, DateTimeOffset now, SessionRevocationReason reason, CancellationToken cancellationToken = default) { RevokeByHashCalls++; RevokedHash = presentedHash; return Task.FromResult(new SessionOperationResult(SessionOperationCode.Succeeded)); }
     }
 }

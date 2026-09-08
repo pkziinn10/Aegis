@@ -12,8 +12,19 @@ public sealed class TransactionRunner(AegisDbContext db)
         for (var attempt = 0; ; attempt++)
         {
             await using var tx = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
-            try { var result = await operation(ct); await tx.CommitAsync(ct); return result; }
-            catch (Exception ex) when ((IsRetryable(ex)) && attempt < 2) { db.ChangeTracker.Clear(); }
+            var committed = false;
+            try
+            {
+                var result = await operation(ct);
+                await tx.CommitAsync(ct);
+                committed = true;
+                return result;
+            }
+            catch (Exception ex) when ((IsRetryable(ex)) && attempt < 2) { }
+            finally
+            {
+                if (!committed) db.ChangeTracker.Clear();
+            }
         }
     }
     private static bool IsSerialization(Exception ex) => ex switch
@@ -28,13 +39,19 @@ public sealed class TransactionRunner(AegisDbContext db)
         for (var attempt = 0; ; attempt++)
         {
             await using var tx = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
+            var committed = false;
             try
             {
                 var outcome = await operation(ct);
                 if (outcome.Commit) await tx.CommitAsync(ct); else await tx.RollbackAsync(ct);
+                committed = outcome.Commit;
                 return outcome.Result;
             }
-            catch (Exception ex) when (IsRetryable(ex) && attempt < 2) { db.ChangeTracker.Clear(); }
+            catch (Exception ex) when (IsRetryable(ex) && attempt < 2) { }
+            finally
+            {
+                if (!committed) db.ChangeTracker.Clear();
+            }
         }
     }
     private static bool IsRetryable(Exception ex) => ex is DbUpdateConcurrencyException || IsSerialization(ex) || (ex.InnerException is not null && IsRetryable(ex.InnerException));

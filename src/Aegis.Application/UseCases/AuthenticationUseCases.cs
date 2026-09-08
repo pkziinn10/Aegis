@@ -13,7 +13,6 @@ internal static class AuthRules
     public static bool ValidPassword(string? value) => !string.IsNullOrEmpty(value) && value.Length >= 12;
     public static Email? ParseEmail(string? value) => value is null ? null : Email.Create(value).Value;
     public static UserDto Dto(User user) => new(user.Id, user.Email.Value, user.Role);
-    public static DateTimeOffset RefreshExpiry(DateTimeOffset now, DateTimeOffset sessionExpiry) => now.AddDays(7) < sessionExpiry ? now.AddDays(7) : sessionExpiry;
     public static ApplicationErrorCode Map(SessionOperationResult result) => result.Code switch
     {
         SessionOperationCode.NotFound => ApplicationErrorCode.SessionNotFound,
@@ -56,14 +55,14 @@ internal static class AuthRules
     };
 }
 
-public sealed class RegisterUseCase(IUserRepository users, ISessionRepository sessions, IPasswordHasher hasher, IAccessTokenIssuer issuer, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit)
+public sealed class RegisterUseCase(IUserRepository users, ISessionRepository sessions, IPasswordHasher hasher, IAccessTokenIssuer issuer, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit, IRefreshTokenPolicy policy)
 {
     public async Task<ApplicationResult<RegisterResult>> ExecuteAsync(RegisterCommand command, CancellationToken ct = default)
     {
         if (command is null || !AuthRules.ValidPassword(command.Password)) return ApplicationResult<RegisterResult>.Failure(ApplicationErrorCode.WeakPassword);
         var email = AuthRules.ParseEmail(command.Email); if (email is null) return ApplicationResult<RegisterResult>.Failure(ApplicationErrorCode.InvalidRequest);
         var user = new User(Guid.NewGuid(), email, hasher.Hash(command.Password), UserRole.User);
-        var now = clock.UtcNow; var expiry = now.AddDays(7); var sessionId = Guid.NewGuid(); var material = factory.Create(sessionId, now, expiry);
+        var now = clock.UtcNow; var expiry = policy.GetSessionExpiration(now); var sessionId = Guid.NewGuid(); var material = factory.Create(sessionId, now, expiry);
         var access = issuer.Issue(user.Id, user.Role, now);
         return await unit.ExecuteInTransactionAsync(async transactionCt =>
         {
@@ -78,7 +77,7 @@ public sealed class RegisterUseCase(IUserRepository users, ISessionRepository se
     }
 }
 
-public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessions, IPasswordHasher hasher, IAccessTokenIssuer issuer, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit, IAuditWriter? audit = null)
+public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessions, IPasswordHasher hasher, IAccessTokenIssuer issuer, IRefreshTokenFactory factory, IClock clock, IUnitOfWork unit, IRefreshTokenPolicy policy, IAuditWriter? audit = null)
 {
     public async Task<ApplicationResult<LoginResult>> ExecuteAsync(LoginCommand command, CancellationToken ct = default)
     {
@@ -86,7 +85,7 @@ public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessi
         var hash = user?.PasswordHash ?? hasher.DummyHash;
         var valid = hasher.Verify(command?.Password ?? string.Empty, hash);
         if (user is null || !user.IsActive || !valid) return ApplicationResult<LoginResult>.Failure(ApplicationErrorCode.InvalidCredentials);
-        var now = clock.UtcNow; var expiry = now.AddDays(7); var sessionId = Guid.NewGuid(); var material = factory.Create(sessionId, now, expiry);
+        var now = clock.UtcNow; var expiry = policy.GetSessionExpiration(now); var sessionId = Guid.NewGuid(); var material = factory.Create(sessionId, now, expiry);
         var access = issuer.Issue(user.Id, user.Role, now);
         return await unit.ExecuteInTransactionAsync(async transactionCt =>
         {
@@ -103,7 +102,7 @@ public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessi
     }
 }
 
-public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFactory factory, IAccessTokenIssuer issuer, IUserRepository users, IClock clock, IUnitOfWork unit, IAuditWriter? audit = null)
+public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFactory factory, IAccessTokenIssuer issuer, IUserRepository users, IClock clock, IUnitOfWork unit, IRefreshTokenPolicy policy, IAuditWriter? audit = null)
 {
     public async Task<ApplicationResult<TokenResult>> ExecuteAsync(RefreshCommand command, CancellationToken ct = default)
     {
@@ -112,7 +111,19 @@ public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFac
         if (session is null) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.InvalidCredentials);
         if (session.IsExpired(now)) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.SessionExpired);
         if (session.IsRevoked) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.SessionRevoked);
-        var expiry = AuthRules.RefreshExpiry(now, session.ExpiresAt); var replacement = factory.Create(session.Id, now, expiry); var domainToken = new RefreshToken(Guid.NewGuid(), session.Id, replacement.Hash, now, expiry);
+        var currentUser = await users.GetByIdAsync(session.UserId, ct);
+        if (currentUser is null || !currentUser.IsActive)
+        {
+            return await unit.ExecuteInTransactionAsync(async transactionCt =>
+            {
+                var revoked = await sessions.RevokeAllByUserIdAtomicallyAsync(session.UserId, now, SessionRevocationReason.Manual, transactionCt);
+                var success = revoked.IsSuccess || revoked.Code == SessionOperationCode.NotFound;
+                return new TransactionOutcome<ApplicationResult<TokenResult>>(
+                    ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.InvalidCredentials),
+                    success ? TransactionDecision.Commit : TransactionDecision.Rollback);
+            }, ct);
+        }
+        var expiry = policy.GetRotationExpiration(now, session.ExpiresAt); var replacement = factory.Create(session.Id, now, expiry); var domainToken = new RefreshToken(Guid.NewGuid(), session.Id, replacement.Hash, now, expiry);
         return await unit.ExecuteInTransactionAsync(async transactionCt =>
         {
             var rotation = await sessions.RotateAndPersistAtomicallyAsync(session.Id, hash, domainToken, now, session.Version, transactionCt);

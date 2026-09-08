@@ -12,7 +12,7 @@ partial class Initial
 {
     protected override void BuildTargetModel(ModelBuilder modelBuilder)
     {
-        modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
+        modelBuilder.HasAnnotation("ProductVersion", "10.0.4");
         modelBuilder.Entity("Aegis.Infrastructure.Persistence.UserRow", b => { b.Property<Guid>("Id"); b.Property<string>("Email").HasMaxLength(254).IsRequired(); b.Property<bool>("IsActive"); b.Property<string>("PasswordHash").IsRequired(); b.Property<int>("Role"); b.Property<long>("Version").IsConcurrencyToken(); b.HasKey("Id"); b.HasIndex("Email").IsUnique(); b.ToTable("users"); });
         modelBuilder.Entity("Aegis.Infrastructure.Persistence.SessionRow", b => { b.Property<Guid>("Id"); b.Property<DateTimeOffset>("CreatedAt"); b.Property<DateTimeOffset>("ExpiresAt"); b.Property<int?>("RevocationReason"); b.Property<DateTimeOffset?>("RevokedAt"); b.Property<Guid>("UserId"); b.Property<long>("Version").IsConcurrencyToken(); b.HasKey("Id"); b.HasIndex("UserId", "RevokedAt"); b.ToTable("sessions"); });
         modelBuilder.Entity("Aegis.Infrastructure.Persistence.RefreshTokenRow", b => { b.Property<Guid>("Id"); b.Property<DateTimeOffset>("CreatedAt"); b.Property<DateTimeOffset>("ExpiresAt"); b.Property<string>("Hash").HasMaxLength(64).IsRequired(); b.Property<DateTimeOffset?>("RevokedAt"); b.Property<Guid>("SessionId"); b.HasKey("Id"); b.HasIndex("Hash").IsUnique(); b.HasIndex("SessionId").HasDatabaseName("IX_refresh_tokens_one_active_per_session").HasFilter("\"RevokedAt\" IS NULL").IsUnique(); b.ToTable("refresh_tokens"); });

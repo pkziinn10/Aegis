@@ -69,6 +69,7 @@ public sealed class PostgresInfrastructureTests
         {
             var uow = new EfUnitOfWork(db, new TransactionRunner(db));
             await uow.ExecuteInTransactionAsync<int>(async ct => { db.AuditEvents.Add(new AuditEventRow { Action = "rollback_probe", CreatedAt = DateTimeOffset.UtcNow }); await Task.CompletedTask; return new(7, TransactionDecision.Rollback); });
+            Assert.Empty(db.ChangeTracker.Entries());
         }
         await using var verify = Create(); Assert.Equal(0, await verify.AuditEvents.CountAsync(x => x.Action == "rollback_probe"));
     }
