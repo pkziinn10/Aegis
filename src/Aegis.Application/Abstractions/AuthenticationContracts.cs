@@ -23,6 +23,26 @@ public interface IRefreshTokenFactory
 }
 
 public interface IClock { DateTimeOffset UtcNow { get; } }
+public interface IRefreshTokenPolicy
+{
+    DateTimeOffset GetSessionExpiration(DateTimeOffset createdAt);
+    DateTimeOffset GetRotationExpiration(DateTimeOffset now, DateTimeOffset sessionExpiration);
+}
+
+public sealed class RefreshTokenPolicy : IRefreshTokenPolicy
+{
+    public RefreshTokenPolicy(int expirationDays)
+    {
+        if (expirationDays is <= 0 or > 7) throw new ArgumentOutOfRangeException(nameof(expirationDays));
+        ExpirationDays = expirationDays;
+    }
+
+    public int ExpirationDays { get; }
+    public DateTimeOffset GetSessionExpiration(DateTimeOffset createdAt) => createdAt.AddDays(ExpirationDays);
+    public DateTimeOffset GetRotationExpiration(DateTimeOffset now, DateTimeOffset sessionExpiration) =>
+        now.AddDays(ExpirationDays) < sessionExpiration ? now.AddDays(ExpirationDays) : sessionExpiration;
+}
+
 public interface IUnitOfWork
 {
     Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<TransactionOutcome<T>>> operation, CancellationToken cancellationToken = default);
@@ -30,6 +50,10 @@ public interface IUnitOfWork
 public enum TransactionDecision { Commit, Rollback }
 public sealed record TransactionOutcome<T>(T Result, TransactionDecision Decision);
 public interface ICurrentUserContext { Guid? UserId { get; } }
+public interface IAuditWriter
+{
+    Task WriteAsync(string action, Guid? userId, IReadOnlyDictionary<string, string?>? metadata = null, CancellationToken cancellationToken = default);
+}
 
 public sealed class AccessToken
 {

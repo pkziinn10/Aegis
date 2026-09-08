@@ -3,10 +3,12 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Aegis.Infrastructure.Services;
+using InfrastructureJwtOptions = Aegis.Infrastructure.Services.JwtOptions;
 
 namespace Aegis.Api.Configuration;
 
-public sealed class JwtBearerOptionsConfigurator(IOptions<JwtOptions> jwtOptionsAccessor)
+public sealed class JwtBearerOptionsConfigurator(IOptions<InfrastructureJwtOptions> jwtOptionsAccessor)
     : IConfigureNamedOptions<JwtBearerOptions>
 {
     public void Configure(string? name, JwtBearerOptions options)
@@ -17,9 +19,6 @@ public sealed class JwtBearerOptionsConfigurator(IOptions<JwtOptions> jwtOptions
         }
 
         var jwtOptions = jwtOptionsAccessor.Value;
-        var signingKey = new SymmetricSecurityKey(
-            Encoding.UTF8.GetBytes(jwtOptions.SecretKey));
-
         options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
@@ -37,12 +36,9 @@ public sealed class JwtBearerOptionsConfigurator(IOptions<JwtOptions> jwtOptions
             RoleClaimType = "roles",
             IssuerSigningKeyResolver = (_, _, tokenKid, _) =>
             {
-                if (!string.Equals(tokenKid, jwtOptions.KeyId, StringComparison.Ordinal))
-                {
-                    return [];
-                }
-
-                return [signingKey];
+                return jwtOptions.Keys
+                    .Where(x => string.Equals(x.Kid, tokenKid, StringComparison.Ordinal))
+                    .Select(x => new SymmetricSecurityKey(Encoding.UTF8.GetBytes(x.Secret)));
             }
         };
 
@@ -58,8 +54,8 @@ public sealed class JwtBearerOptionsConfigurator(IOptions<JwtOptions> jwtOptions
 
                 var iat = context.Principal?.FindFirst(JwtRegisteredClaimNames.Iat)?.Value;
                 var exp = context.Principal?.FindFirst(JwtRegisteredClaimNames.Exp)?.Value;
-                if (!JwtOptions.TryReadNumericDate(iat, out var issuedAt)
-                    || !JwtOptions.TryReadNumericDate(exp, out var expiresAt))
+                if (!InfrastructureJwtOptions.TryReadNumericDate(iat, out var issuedAt)
+                    || !InfrastructureJwtOptions.TryReadNumericDate(exp, out var expiresAt))
                 {
                     context.Fail("The JWT must contain valid iat and exp claims.");
                 }

@@ -6,37 +6,22 @@ using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Aegis.Application;
+using Aegis.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 
-builder.Services.AddOptions<JwtOptions>()
-    .BindConfiguration(JwtOptions.SectionName)
-    .Validate(JwtOptions.HasMinimumSecretLength,
-        "JWT secret must contain at least 32 UTF-8 bytes.")
-    .Validate(options => options.Algorithm == SecurityAlgorithms.HmacSha256,
-        "Only HS256 is supported.")
-    .Validate(options => options.Issuer == "Aegis.Api",
-        "JWT issuer must be Aegis.Api.")
-    .Validate(options => options.Audience == "Aegis.Client",
-        "JWT audience must be Aegis.Client.")
-    .Validate(options => options.KeyId == "aegis-primary-01",
-        "JWT key id must be aegis-primary-01.")
-    .Validate(JwtOptions.HasValidExpirationWindow,
-        "Access token expiration must be between 1 and 15 minutes.")
-    .Validate(options => options.RefreshTokenExpirationDays is > 0 and <= 7,
-        "Refresh token expiration must be between 1 and 7 days.")
-    .Validate(options => options.ClockSkewSeconds is >= 0 and <= 30,
-        "Clock skew must be between 0 and 30 seconds.")
-    .ValidateOnStart();
-
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
 
 builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>, JwtBearerOptionsConfigurator>();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddAegisApplication();
+builder.Services.AddAegisInfrastructure(builder.Configuration);
 
 builder.Services.AddAuthorization();
 
