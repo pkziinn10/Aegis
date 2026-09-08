@@ -1,5 +1,6 @@
 using Aegis.Domain.Entities;
 using Aegis.Domain.Enums;
+using Aegis.Domain.Repositories;
 using Aegis.Domain.Results;
 using Aegis.Domain.ValueObjects;
 
@@ -45,7 +46,7 @@ public sealed class DomainTests
     public void User_preserva_identidade_e_permite_estado_e_papel()
     {
         var id = Guid.NewGuid();
-        var user = new User(id, new Email("user@example.com"));
+        var user = new User(id, new Email("user@example.com"), "hash-1");
         user.ChangeRole(UserRole.Admin);
         user.Deactivate();
 
@@ -58,7 +59,7 @@ public sealed class DomainTests
     [Fact]
     public void User_incrementa_version_somente_em_mutacoes_efetivas()
     {
-        var user = new User(Guid.NewGuid(), new Email("user@example.com"), version: 4);
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1", version: 4);
 
         user.ChangeEmail(new Email("USER@example.com"));
         user.ChangeRole(UserRole.User);
@@ -76,7 +77,7 @@ public sealed class DomainTests
     public void User_rejeita_version_invalida()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new User(Guid.NewGuid(), new Email("user@example.com"), version: 0));
+            new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1", version: 0));
     }
 
     [Fact]
@@ -84,15 +85,81 @@ public sealed class DomainTests
     {
         var id = Guid.NewGuid();
         var email = new Email("user@example.com");
-        var user = User.Rehydrate(id, email, UserRole.Admin, false, 7);
+        var user = User.Rehydrate(id, email, "hash-1", UserRole.Admin, false, 7);
 
         Assert.Equal(id, user.Id);
         Assert.Equal(email, user.Email);
+        Assert.Equal("hash-1", user.PasswordHash);
         Assert.Equal(UserRole.Admin, user.Role);
         Assert.False(user.IsActive);
         Assert.Equal(7, user.Version);
         user.Activate();
         Assert.Equal(8, user.Version);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    public void User_rejeita_hash_de_senha_vazio_ou_branco(string passwordHash)
+    {
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1");
+
+        var result = user.ChangePasswordHash(passwordHash);
+
+        Assert.Equal(DomainErrorCode.InvalidPasswordHash, result.ErrorCode);
+        Assert.Equal("hash-1", user.PasswordHash);
+        Assert.Equal(1, user.Version);
+    }
+
+    [Fact]
+    public void User_altera_hash_e_incrementa_version()
+    {
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1", version: 4);
+
+        var result = user.ChangePasswordHash("hash-2");
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("hash-2", user.PasswordHash);
+        Assert.Equal(5, user.Version);
+    }
+
+    [Fact]
+    public void User_rejeita_hash_nulo_na_criacao()
+    {
+        Assert.Throws<ArgumentNullException>(() =>
+            new User(Guid.NewGuid(), new Email("user@example.com"), null!));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    public void User_rejeita_hash_vazio_ou_branco_na_criacao_e_reidratacao(string passwordHash)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new User(Guid.NewGuid(), new Email("user@example.com"), passwordHash));
+        Assert.Throws<ArgumentException>(() =>
+            User.Rehydrate(Guid.NewGuid(), new Email("user@example.com"), passwordHash,
+                UserRole.User, true, 1));
+    }
+
+    [Fact]
+    public void SessionRevocationReason_inclui_password_changed()
+    {
+        Assert.True(Enum.IsDefined(SessionRevocationReason.PasswordChanged));
+    }
+
+    [Fact]
+    public void Contrato_de_usuario_exige_insercao_atomica_condicional()
+    {
+        var method = typeof(IUserRepository).GetMethod("AddIfNotExistsAtomicallyAsync");
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(Task<UserInsertResult>), method!.ReturnType);
+        Assert.Contains("AddAsync", typeof(IUserRepository).GetMethods().Select(m => m.Name));
+        Assert.True(new UserInsertResult(UserInsertCode.Succeeded).IsSuccess);
+        Assert.False(new UserInsertResult(UserInsertCode.DuplicateEmail).IsSuccess);
     }
 
     [Fact]
@@ -326,12 +393,25 @@ public sealed class DomainTests
     [Fact]
     public void Contrato_de_sessao_exige_historico_e_CAS_atômico()
     {
-        var methods = typeof(Aegis.Domain.Repositories.ISessionRepository).GetMethods().Select(m => m.Name).ToHashSet();
+        var repository = typeof(Aegis.Domain.Repositories.ISessionRepository);
+        var methods = repository.GetMethods().Select(m => m.Name).ToHashSet();
         Assert.Contains("GetByRefreshTokenHashWithHistoryAsync", methods);
+        var creation = repository.GetMethod("AddIfUserActiveAtomicallyAsync");
+        Assert.NotNull(creation);
+        Assert.Equal(typeof(Task<SessionCreationResult>), creation!.ReturnType);
+        Assert.Contains(creation.GetParameters(), parameter => parameter.Name == "expectedUserVersion");
+        Assert.True(new SessionCreationResult(SessionCreationCode.Succeeded).IsSuccess);
+        Assert.False(new SessionCreationResult(SessionCreationCode.UserNotFoundOrInactive).IsSuccess);
+        Assert.False(new SessionCreationResult(SessionCreationCode.ConcurrencyConflict).IsSuccess);
         Assert.Contains("RotateAndPersistAtomicallyAsync", methods);
         Assert.Contains("RevokeAndPersistAtomicallyAsync", methods);
+        Assert.Contains("RevokeAllByUserIdAtomicallyAsync", methods);
+        var logout = repository.GetMethod("RevokeByRefreshTokenHashAtomicallyAsync");
+        Assert.NotNull(logout);
+        Assert.Equal(typeof(Task<SessionOperationResult>), logout!.ReturnType);
+        Assert.Contains(logout.GetParameters(), parameter => parameter.Name == "presentedHash");
+        Assert.True(new SessionOperationResult(SessionOperationCode.Succeeded).IsSuccess);
         Assert.DoesNotContain("UpdateAsync", methods);
-        Assert.Contains("RotateAndPersistAtomicallyAsync", methods);
     }
 
     [Fact]
