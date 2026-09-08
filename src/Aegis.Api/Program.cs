@@ -1,4 +1,5 @@
 using System.Threading.RateLimiting;
+using Aegis.Api;
 using Aegis.Api.Configuration;
 using Aegis.Api.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -11,8 +12,19 @@ using Aegis.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers();
+builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
+    options.InvalidModelStateResponseFactory = context =>
+        ApiErrors.From(context.HttpContext, Aegis.Application.Results.ApplicationErrorCode.InvalidRequest));
 builder.Services.AddOpenApi();
+builder.Services.AddAntiforgery(options =>
+{
+    options.HeaderName = "X-CSRF-TOKEN";
+    options.Cookie.Name = "__Host-csrf-token";
+    options.Cookie.HttpOnly = false;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.Cookie.Path = "/";
+});
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -23,7 +35,12 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddAegisApplication();
 builder.Services.AddAegisInfrastructure(builder.Configuration);
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(SecurityPolicyNames.AuthenticatedUser, policy => policy.RequireAuthenticatedUser());
+    options.AddPolicy(SecurityPolicyNames.AdminOnly, policy => policy.RequireAuthenticatedUser().RequireRole("admin"));
+});
+builder.Services.AddSingleton<OriginValidator>();
 
 builder.Services.AddOptions<CorsOptions>()
     .BindConfiguration(CorsOptions.SectionName)
@@ -78,9 +95,7 @@ builder.Services.AddRateLimiter(options =>
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.OnRejected = async (context, _) =>
     {
-        context.HttpContext.Response.ContentType = "application/problem+json";
-        await context.HttpContext.Response.WriteAsync(
-            "{\"title\":\"Too Many Requests\",\"status\":429}");
+        await ApiErrors.WriteAsync(context.HttpContext, StatusCodes.Status429TooManyRequests, "RateLimitExceeded");
     };
 
     options.AddPolicy(SecurityPolicyNames.AuthByIp, context =>
@@ -96,6 +111,19 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+{
+    var error = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+    if (error is BadHttpRequestException { StatusCode: StatusCodes.Status413RequestEntityTooLarge }
+        || error is InvalidDataException)
+    {
+        await ApiErrors.WriteAsync(context, StatusCodes.Status413RequestEntityTooLarge, "PayloadTooLarge");
+        return;
+    }
+
+    await ApiErrors.WriteAsync(context, StatusCodes.Status500InternalServerError, "InternalServerError");
+}));
 
 if (reverseProxyOptions.Enabled)
 {
@@ -124,8 +152,64 @@ else
 app.UseHttpsRedirection();
 app.UseCors("Browser");
 app.UseCookiePolicy();
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value;
+    var maxPayloadBytes = path is "/auth/browser/register" or "/auth/browser/login" or "/auth/token/register" or "/auth/token/login"
+        ? 16 * 1024
+        : path is "/auth/browser/refresh" or "/auth/token/refresh" or "/auth/token/logout" or "/auth/browser/logout"
+            ? 8 * 1024
+            : (int?)null;
+
+    if (context.Request.Method == HttpMethods.Post && maxPayloadBytes is int limit)
+    {
+        if (context.Request.ContentLength > limit)
+        {
+            await ApiErrors.WriteAsync(context, StatusCodes.Status413RequestEntityTooLarge, "PayloadTooLarge");
+            return;
+        }
+
+        context.Request.EnableBuffering();
+        var buffer = new byte[8192];
+        var total = 0;
+        while (true)
+        {
+            var read = await context.Request.Body.ReadAsync(buffer);
+            total += read;
+            if (total > limit)
+            {
+                await ApiErrors.WriteAsync(context, StatusCodes.Status413RequestEntityTooLarge, "PayloadTooLarge");
+                return;
+            }
+
+            if (read == 0) break;
+        }
+
+        context.Request.Body.Position = 0;
+    }
+
+    await next();
+});
 app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    const int maxBearerBytes = 8 * 1024;
+    if (context.Request.Headers.Authorization.Count > 0
+        && System.Text.Encoding.UTF8.GetByteCount(context.Request.Headers.Authorization.ToString()) > maxBearerBytes)
+    {
+        await ApiErrors.WriteAsync(context, StatusCodes.Status401Unauthorized, "InvalidBearerToken");
+        return;
+    }
+
+    await next();
+});
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    await next();
+    if (!context.Response.HasStarted && context.Response.StatusCode is StatusCodes.Status401Unauthorized or StatusCodes.Status403Forbidden)
+        await ApiErrors.WriteAsync(context, context.Response.StatusCode, context.Response.StatusCode == 401 ? "Unauthorized" : "Forbidden");
+});
 app.UseAuthorization();
 
 app.MapControllers();

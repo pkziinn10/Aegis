@@ -72,7 +72,7 @@ public sealed class RegisterUseCase(IUserRepository users, ISessionRepository se
                     ApplicationResult<RegisterResult>.Failure(ApplicationErrorCode.EmailAlreadyRegistered), TransactionDecision.Rollback);
             await sessions.AddAsync(new Session(sessionId, user.Id, now, expiry, [new RefreshToken(Guid.NewGuid(), sessionId, material.Hash, now, expiry)]), transactionCt);
             return new TransactionOutcome<ApplicationResult<RegisterResult>>(
-                ApplicationResult<RegisterResult>.Success(new(AuthRules.Dto(user), new(access, material.Value))), TransactionDecision.Commit);
+                ApplicationResult<RegisterResult>.Success(new(AuthRules.Dto(user), new(access, new(material.Value.Value)))), TransactionDecision.Commit);
         }, ct);
     }
 }
@@ -97,7 +97,7 @@ public sealed class LoginUseCase(IUserRepository users, ISessionRepository sessi
                     ApplicationResult<LoginResult>.Failure(AuthRules.Map(creation)), TransactionDecision.Rollback);
             if (audit is not null) await audit.WriteAsync("login", user.Id, new Dictionary<string, string?> { ["result"] = "success" }, transactionCt);
             return new TransactionOutcome<ApplicationResult<LoginResult>>(
-                ApplicationResult<LoginResult>.Success(new(AuthRules.Dto(user), new(access, material.Value))), TransactionDecision.Commit);
+                ApplicationResult<LoginResult>.Success(new(AuthRules.Dto(user), new(access, new(material.Value.Value)))), TransactionDecision.Commit);
         }, ct);
     }
 }
@@ -106,8 +106,8 @@ public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFac
 {
     public async Task<ApplicationResult<TokenResult>> ExecuteAsync(RefreshCommand command, CancellationToken ct = default)
     {
-        if (command?.RefreshToken is null) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.InvalidCredentials);
-        var now = clock.UtcNow; var hash = factory.Hash(command.RefreshToken); var session = await sessions.GetByRefreshTokenHashWithHistoryAsync(hash, ct);
+        if (string.IsNullOrWhiteSpace(command?.RefreshToken)) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.InvalidCredentials);
+        var now = clock.UtcNow; var hash = factory.Hash(new RefreshTokenValue(command.RefreshToken)); var session = await sessions.GetByRefreshTokenHashWithHistoryAsync(hash, ct);
         if (session is null) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.InvalidCredentials);
         if (session.IsExpired(now)) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.SessionExpired);
         if (session.IsRevoked) return ApplicationResult<TokenResult>.Failure(ApplicationErrorCode.SessionRevoked);
@@ -151,7 +151,7 @@ public sealed class RefreshUseCase(ISessionRepository sessions, IRefreshTokenFac
             var access = issuer.Issue(user.Id, user.Role, now);
             if (audit is not null) await audit.WriteAsync("refresh_rotation", user.Id, new Dictionary<string, string?> { ["result"] = "success", ["sessionId"] = session.Id.ToString("N") }, transactionCt);
             return new TransactionOutcome<ApplicationResult<TokenResult>>(
-                ApplicationResult<TokenResult>.Success(new(access, replacement.Value)), TransactionDecision.Commit);
+                ApplicationResult<TokenResult>.Success(new(access, new(replacement.Value.Value))), TransactionDecision.Commit);
         }, ct);
     }
 }
@@ -160,12 +160,12 @@ public sealed class LogoutUseCase(ISessionRepository sessions, IRefreshTokenFact
 {
     public async Task<ApplicationResult> ExecuteAsync(LogoutCommand command, CancellationToken ct = default)
     {
-        if (command?.RefreshToken is null) return ApplicationResult.Success();
+        if (string.IsNullOrWhiteSpace(command?.RefreshToken)) return ApplicationResult.Success();
         var now = clock.UtcNow;
         var result = await unit.ExecuteInTransactionAsync(async transactionCt =>
         {
             var operation = await sessions.RevokeByRefreshTokenHashAtomicallyAsync(
-                factory.Hash(command.RefreshToken), now, SessionRevocationReason.Manual, transactionCt);
+                factory.Hash(new RefreshTokenValue(command.RefreshToken)), now, SessionRevocationReason.Manual, transactionCt);
             var success = operation.IsSuccess || operation.Code == SessionOperationCode.NotFound;
             if (success && audit is not null) await audit.WriteAsync("logout", context?.UserId, new Dictionary<string, string?> { ["result"] = "success" }, transactionCt);
             return new TransactionOutcome<ApplicationResult>(

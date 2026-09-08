@@ -66,9 +66,10 @@ public sealed class AccessToken
 
 public sealed class RefreshTokenValue
 {
+    public RefreshTokenValue(string value) => (Value, ExpiresAt) = (value, null);
     public RefreshTokenValue(string value, DateTimeOffset expiresAt) => (Value, ExpiresAt) = (value, expiresAt);
     [JsonIgnore] public string Value { get; }
-    public DateTimeOffset ExpiresAt { get; }
+    public DateTimeOffset? ExpiresAt { get; }
     public override string ToString() => "[REDACTED REFRESH TOKEN]";
 }
 
@@ -78,7 +79,7 @@ public sealed class RefreshTokenMaterial
     {
         if (value is null) throw new ArgumentNullException(nameof(value));
         if (string.IsNullOrWhiteSpace(hash)) throw new ArgumentException("Hash inválido.", nameof(hash));
-        if (expiresAt != value.ExpiresAt) throw new ArgumentException("Expirações inconsistentes.", nameof(expiresAt));
+        if (value.ExpiresAt is not DateTimeOffset valueExpiresAt || expiresAt != valueExpiresAt) throw new ArgumentException("Expirações inconsistentes.", nameof(expiresAt));
         if (expiresAt <= createdAt) throw new ArgumentException("Expiração inválida.", nameof(expiresAt));
         (Value, Hash, ExpiresAt) = (value, hash, expiresAt);
     }

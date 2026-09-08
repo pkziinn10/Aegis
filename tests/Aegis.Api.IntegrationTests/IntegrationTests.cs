@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -311,6 +312,9 @@ public sealed class RateLimitIntegrationTests
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         Assert.Equal("Too Many Requests", problem?.Title);
         Assert.Equal(429, problem?.Status);
+        var problemBody = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("RateLimitExceeded", problemBody.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(problemBody.GetProperty("traceId").GetString()));
 
         using var otherIp = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
         otherIp.Headers.Add("X-Test-Remote-IP", "10.0.0.2");
@@ -327,4 +331,274 @@ public sealed class RateLimitIntegrationTests
     }
 }
 
+public sealed class IdentityApiIntegrationTests
+{
+    [Fact]
+    public async Task Token_logout_is_rate_limited_by_ip()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+
+        for (var i = 0; i < 5; i++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/auth/token/logout");
+            request.Headers.Add("X-Test-Remote-IP", "10.0.0.30");
+            Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(request)).StatusCode);
+        }
+
+        using var sixth = new HttpRequestMessage(HttpMethod.Post, "/auth/token/logout");
+        sixth.Headers.Add("X-Test-Remote-IP", "10.0.0.30");
+        var response = await client.SendAsync(sixth);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Me_without_credentials_returns_unauthorized()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+
+        var response = await client.GetAsync("/api/auth/me");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertProblem(response, "Unauthorized", 401);
+    }
+
+    [Fact]
+    public async Task Oversized_bearer_is_rejected_before_authentication()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", new string('x', 8 * 1024));
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertProblem(response, "InvalidBearerToken", 401);
+    }
+
+    [Fact]
+    public async Task Oversized_auth_payload_is_rejected_before_password_processing()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/auth/token/login")
+        {
+            Content = JsonContent.Create(new { email = "payload@example.com", password = new string('p', 17 * 1024) })
+        };
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        AssertProblem(response, "PayloadTooLarge", 413);
+        Assert.DoesNotContain("InvalidPasswordHash", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Admin_token_is_accepted_by_admin_endpoint()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateAdminToken());
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/integration/role")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Browser_mutation_rejects_unlisted_origin_before_application()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/auth/browser/login")
+        {
+            Content = JsonContent.Create(new { email = "user@example.com", password = "a-password-longer-than-12" })
+        };
+        request.Headers.Add("Origin", "https://evil.example");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        AssertProblem(response, "InvalidRequest", 403);
+    }
+
+    private static string CreateAdminToken()
+    {
+        var now = DateTimeOffset.UtcNow.AddSeconds(-5);
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, "integration-admin"),
+            new Claim(JwtRegisteredClaimNames.Iat, now.ToUnixTimeSeconds().ToString()),
+            new Claim("roles", "admin")
+        };
+        var credentials = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TestSettings.Secret)) { KeyId = "aegis-primary-01" },
+            SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken("Aegis.Api", "Aegis.Client", claims,
+            now.UtcDateTime, now.AddMinutes(5).UtcDateTime, credentials);
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static void AssertProblem(HttpResponseMessage response, string code, int status)
+    {
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        var body = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult()).RootElement;
+        Assert.Equal(status, body.GetProperty("status").GetInt32());
+        Assert.Equal(code, body.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("traceId").GetString()));
+    }
+
+    [Fact]
+    public async Task Browser_refresh_requires_origin_and_csrf()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/auth/browser/refresh");
+        request.Headers.Add("Origin", "https://localhost:5173");
+
+        var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains("\"code\":\"InvalidRequest\"", body);
+        Assert.Contains("traceId", body);
+        Assert.DoesNotContain("InvalidPasswordHash", body);
+    }
+
+    [Fact]
+    public async Task Invalid_json_returns_safe_problem_details()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/auth/token/login")
+        {
+            Content = new StringContent("{not-json", System.Text.Encoding.UTF8, "application/json")
+        };
+
+        var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains("\"code\":\"InvalidRequest\"", body);
+        Assert.Contains("traceId", body);
+        Assert.DoesNotContain("not-json", body);
+    }
+}
+
 public sealed record RateLimitProblem(string Title, int Status);
+
+public sealed class AuthenticationFlowIntegrationTests
+{
+    [Fact]
+    public async Task Browser_register_emits_host_refresh_and_csrf_cookies_without_refresh_body()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        var email = $"browser-register-{Guid.NewGuid():N}@example.com";
+
+        using var request = Credentials(HttpMethod.Post, "/auth/browser/register", email);
+        request.Headers.Add("Origin", "https://localhost:5173");
+        var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain("refresh", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("csrfToken", body, StringComparison.Ordinal);
+        AssertCookie(response, "__Host-refresh-token", httpOnly: true);
+        AssertCookie(response, "__Host-csrf-token", httpOnly: true);
+    }
+
+    [Fact]
+    public async Task Browser_login_and_refresh_rotate_host_cookie_and_keep_refresh_out_of_body()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        var email = $"browser-login-{Guid.NewGuid():N}@example.com";
+        const string password = "browser-password-123";
+
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email, password);
+        var registered = await client.SendAsync(register);
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+
+        using var login = Credentials(HttpMethod.Post, "/auth/browser/login", email, password);
+        login.Headers.Add("Origin", "https://localhost:5173");
+        var loggedIn = await client.SendAsync(login);
+        var loginBody = await loggedIn.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, loggedIn.StatusCode);
+        Assert.DoesNotContain("refresh", loginBody, StringComparison.OrdinalIgnoreCase);
+
+        var refreshCookie = CookieValue(loggedIn, "__Host-refresh-token");
+        var csrfToken = JsonDocument.Parse(loginBody).RootElement.GetProperty("csrfToken").GetString()!;
+        using var refresh = new HttpRequestMessage(HttpMethod.Post, "/auth/browser/refresh");
+        refresh.Headers.Add("Origin", "https://localhost:5173");
+        refresh.Headers.Add("X-CSRF-TOKEN", csrfToken);
+        refresh.Headers.Add("Cookie", $"__Host-refresh-token={refreshCookie}");
+
+        var rotated = await client.SendAsync(refresh);
+        var rotatedBody = await rotated.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, rotated.StatusCode);
+        Assert.DoesNotContain("refresh", rotatedBody, StringComparison.OrdinalIgnoreCase);
+        var rotatedCookie = CookieValue(rotated, "__Host-refresh-token");
+        Assert.NotEqual(refreshCookie, rotatedCookie);
+        AssertCookie(rotated, "__Host-refresh-token", httpOnly: true);
+    }
+
+    [Fact]
+    public async Task Token_register_login_and_refresh_return_refresh_json()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        var email = $"token-flow-{Guid.NewGuid():N}@example.com";
+        const string password = "token-password-123";
+
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email, password);
+        var registered = await client.SendAsync(register);
+        var registeredBody = JsonDocument.Parse(await registered.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        var registeredRefresh = registeredBody.GetProperty("refreshToken").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(registeredRefresh));
+
+        using var login = Credentials(HttpMethod.Post, "/auth/token/login", email, password);
+        var loggedIn = await client.SendAsync(login);
+        var loginBody = JsonDocument.Parse(await loggedIn.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(HttpStatusCode.OK, loggedIn.StatusCode);
+        var loginRefresh = loginBody.GetProperty("refreshToken").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(loginRefresh));
+
+        using var refresh = new HttpRequestMessage(HttpMethod.Post, "/auth/token/refresh")
+        {
+            Content = JsonContent.Create(new { refreshToken = loginRefresh })
+        };
+        var refreshed = await client.SendAsync(refresh);
+        var refreshedBody = JsonDocument.Parse(await refreshed.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);
+        Assert.False(string.IsNullOrWhiteSpace(refreshedBody.GetProperty("refreshToken").GetString()));
+        Assert.DoesNotContain("__Host-refresh-token", refreshed.Headers.SelectMany(x => x.Value));
+    }
+
+    private static HttpRequestMessage Credentials(HttpMethod method, string path, string email, string password = "password-123456") => new(method, path)
+    {
+        Content = JsonContent.Create(new { email, password })
+    };
+
+    private static string CookieValue(HttpResponseMessage response, string name) =>
+        response.Headers.GetValues("Set-Cookie")
+            .Select(value => value.Split(';', 2)[0])
+            .Single(value => value.StartsWith(name + "=", StringComparison.Ordinal))
+            .Substring(name.Length + 1);
+
+    private static void AssertCookie(HttpResponseMessage response, string name, bool httpOnly)
+    {
+        var cookie = response.Headers.GetValues("Set-Cookie")
+            .Single(value => value.StartsWith(name + "=", StringComparison.Ordinal));
+        Assert.Contains("Secure", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Path=/", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("SameSite=Strict", cookie, StringComparison.OrdinalIgnoreCase);
+        if (httpOnly) Assert.Contains("HttpOnly", cookie, StringComparison.OrdinalIgnoreCase);
+        else Assert.DoesNotContain("HttpOnly", cookie, StringComparison.OrdinalIgnoreCase);
+    }
+}
