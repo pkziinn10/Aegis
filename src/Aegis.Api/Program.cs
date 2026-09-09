@@ -7,6 +7,7 @@ using Aegis.Api;
 using Aegis.Api.Configuration;
 using Aegis.Api.Controllers;
 using Aegis.Api.Security;
+using Aegis.Api.OpenApi;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -37,7 +38,9 @@ builder.Services.AddOpenApi(options =>
             Description = "JWT Bearer token"
         };
         return Task.CompletedTask;
-    }));
+    })
+    .AddOperationTransformer<AuthenticationExamplesOperationTransformer>()
+    .AddOperationTransformer<AuthorizationOperationTransformer>());
 builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-CSRF-TOKEN";
