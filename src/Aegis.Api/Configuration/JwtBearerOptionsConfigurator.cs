@@ -1,10 +1,12 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Aegis.Infrastructure.Services;
 using InfrastructureJwtOptions = Aegis.Infrastructure.Services.JwtOptions;
+using JsonWebToken = Microsoft.IdentityModel.JsonWebTokens.JsonWebToken;
 
 namespace Aegis.Api.Configuration;
 
@@ -54,17 +56,22 @@ public sealed class JwtBearerOptionsConfigurator(IOptions<InfrastructureJwtOptio
 
                 var iat = context.Principal?.FindFirst(JwtRegisteredClaimNames.Iat)?.Value;
                 var exp = context.Principal?.FindFirst(JwtRegisteredClaimNames.Exp)?.Value;
-                if (!InfrastructureJwtOptions.TryReadNumericDate(iat, out var issuedAt)
+                var nbf = context.Principal?.FindFirst(JwtRegisteredClaimNames.Nbf)?.Value;
+                if (!HasJsonNumericDate(context.SecurityToken, JwtRegisteredClaimNames.Nbf)
+                    || !InfrastructureJwtOptions.TryReadNumericDate(iat, out var issuedAt)
+                    || !InfrastructureJwtOptions.TryReadNumericDate(nbf, out var notBefore)
                     || !InfrastructureJwtOptions.TryReadNumericDate(exp, out var expiresAt))
                 {
-                    context.Fail("The JWT must contain valid iat and exp claims.");
+                    context.Fail("The JWT must contain valid iat, nbf and exp claims.");
                 }
                 else
                 {
                     var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                     var maxDuration = TimeSpan.FromMinutes(jwtOptions.AccessTokenExpirationMinutes).TotalSeconds;
                     if (issuedAt > now + jwtOptions.ClockSkewSeconds
+                        || notBefore > now + jwtOptions.ClockSkewSeconds
                         || issuedAt > expiresAt
+                        || notBefore > expiresAt
                         || expiresAt - issuedAt > maxDuration)
                     {
                         context.Fail("The JWT issued-at and expiration window is invalid.");
@@ -74,6 +81,31 @@ public sealed class JwtBearerOptionsConfigurator(IOptions<InfrastructureJwtOptio
                 return Task.CompletedTask;
             }
         };
+    }
+
+    private static bool HasJsonNumericDate(SecurityToken token, string claimName)
+    {
+        try
+        {
+            var encodedPayload = token switch
+            {
+                JwtSecurityToken jwt => jwt.RawData.Split('.')[1],
+                JsonWebToken jsonWebToken => jsonWebToken.EncodedPayload,
+                _ => null
+            };
+
+            if (encodedPayload is null) return false;
+
+            using var payload = JsonDocument.Parse(Base64UrlEncoder.DecodeBytes(encodedPayload));
+            return payload.RootElement.TryGetProperty(claimName, out var value)
+                && value.ValueKind == JsonValueKind.Number
+                && value.TryGetInt64(out var seconds)
+                && seconds >= 0;
+        }
+        catch (JsonException) { return false; }
+        catch (FormatException) { return false; }
+        catch (ArgumentException) { return false; }
+        catch (IndexOutOfRangeException) { return false; }
     }
 
     public void Configure(JwtBearerOptions options) => Configure(

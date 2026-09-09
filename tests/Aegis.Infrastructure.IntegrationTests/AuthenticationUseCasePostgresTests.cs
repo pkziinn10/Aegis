@@ -77,10 +77,14 @@ public sealed class AuthenticationUseCasePostgresTests(PostgresContainerFixture 
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ConnectionStrings:Aegis"] = fixture.ConnectionString,
-            ["Jwt:SecretKey"] = new string('x', 64), ["Jwt:Algorithm"] = "HS256",
-            ["Jwt:Issuer"] = "Aegis.Api", ["Jwt:Audience"] = "Aegis.Client",
-            ["Jwt:KeyId"] = "aegis-primary-01", ["Jwt:AccessTokenExpirationMinutes"] = "15",
-            ["Jwt:RefreshTokenExpirationDays"] = "7", ["Jwt:ClockSkewSeconds"] = "30"
+            ["Jwt:SecretKey"] = new string('x', 64),
+            ["Jwt:Algorithm"] = "HS256",
+            ["Jwt:Issuer"] = "Aegis.Api",
+            ["Jwt:Audience"] = "Aegis.Client",
+            ["Jwt:KeyId"] = "aegis-primary-01",
+            ["Jwt:AccessTokenExpirationMinutes"] = "15",
+            ["Jwt:RefreshTokenExpirationDays"] = "7",
+            ["Jwt:ClockSkewSeconds"] = "30"
         }).Build();
         var http = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
         return new ServiceCollection().AddSingleton<IHttpContextAccessor>(http)

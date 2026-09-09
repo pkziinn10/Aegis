@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Threading.RateLimiting;
 using Aegis.Api;
 using Aegis.Api.Configuration;
@@ -12,7 +15,9 @@ using Aegis.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
+builder.Services.AddControllers().AddJsonOptions(options =>
+    options.JsonSerializerOptions.Converters.Add(new CredentialsRequestJsonConverter()))
+    .ConfigureApiBehaviorOptions(options =>
     options.InvalidModelStateResponseFactory = context =>
         ApiErrors.From(context.HttpContext, Aegis.Application.Results.ApplicationErrorCode.InvalidRequest));
 builder.Services.AddOpenApi();
@@ -20,7 +25,7 @@ builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-CSRF-TOKEN";
     options.Cookie.Name = "__Host-csrf-token";
-    options.Cookie.HttpOnly = false;
+    options.Cookie.HttpOnly = true;
     options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
     options.Cookie.SameSite = SameSiteMode.Strict;
     options.Cookie.Path = "/";
@@ -32,6 +37,7 @@ builder.Services
 
 builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>, JwtBearerOptionsConfigurator>();
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<AccountRateLimitFilter>();
 builder.Services.AddAegisApplication();
 builder.Services.AddAegisInfrastructure(builder.Configuration);
 
@@ -54,6 +60,12 @@ if (!CorsOptions.IsValid(corsOptions))
 {
     throw new InvalidOperationException("Cors:AllowedOrigins configuration is invalid.");
 }
+
+var accountKeySecret = builder.Configuration["RateLimiting:AccountKeySecret"];
+if (string.IsNullOrWhiteSpace(accountKeySecret) || Encoding.UTF8.GetByteCount(accountKeySecret) < 32)
+    throw new InvalidOperationException("RateLimiting:AccountKeySecret must be supplied by environment and contain at least 32 UTF-8 bytes.");
+builder.Services.AddSingleton(serviceProvider =>
+    new AccountRateLimiter(serviceProvider.GetRequiredService<IConfiguration>(), accountKeySecret));
 
 var allowedHosts = builder.Configuration["AllowedHosts"];
 if (!AllowedHostsOptions.IsValid(allowedHosts))
@@ -98,16 +110,29 @@ builder.Services.AddRateLimiter(options =>
         await ApiErrors.WriteAsync(context.HttpContext, StatusCodes.Status429TooManyRequests, "RateLimitExceeded");
     };
 
+    var window = TimeSpan.FromSeconds(Math.Clamp(builder.Configuration.GetValue("RateLimiting:WindowSeconds", 60), 1, 3600));
+    var loginIpLimit = Math.Clamp(builder.Configuration.GetValue("RateLimiting:LoginIpPermitLimit", 5), 1, 1000);
+    var otherIpLimit = Math.Clamp(builder.Configuration.GetValue("RateLimiting:OtherIpPermitLimit", 5), 1, 1000);
+
+    // In-memory limiter: state is local to each API process and is not durable.
+    static FixedWindowRateLimiterOptions Fixed(int limit, TimeSpan window) => new()
+    {
+        PermitLimit = limit,
+        Window = window,
+        QueueLimit = 0,
+        AutoReplenishment = true
+    };
+
     options.AddPolicy(SecurityPolicyNames.AuthByIp, context =>
         RateLimitPartition.GetFixedWindowLimiter(
             context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions
-            {
-                PermitLimit = 5,
-                Window = TimeSpan.FromMinutes(1),
-                QueueLimit = 0,
-                AutoReplenishment = true
-            }));
+            _ => Fixed(otherIpLimit, window)));
+    options.AddPolicy(SecurityPolicyNames.OtherOperationByIp, context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => Fixed(otherIpLimit, window)));
+    options.AddPolicy(SecurityPolicyNames.LoginByIp, context =>
+        RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => Fixed(loginIpLimit, window)));
 });
 
 var app = builder.Build();

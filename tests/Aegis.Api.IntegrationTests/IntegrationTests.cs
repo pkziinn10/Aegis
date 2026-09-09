@@ -3,8 +3,10 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -15,6 +17,15 @@ using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
 
 namespace Aegis.Api.IntegrationTests;
+
+internal static class IntegrationTestEnvironment
+{
+    [ModuleInitializer]
+    public static void Initialize()
+    {
+        Environment.SetEnvironmentVariable("RateLimiting__AccountKeySecret", TestSettings.Secret);
+    }
+}
 
 [Collection("Postgres")]
 public sealed class StartupConfigurationTests
@@ -109,6 +120,10 @@ public sealed class JwtIntegrationTests
     [InlineData("iat-future")]
     [InlineData("iat-after-exp")]
     [InlineData("duration")]
+    [InlineData("nbf-missing")]
+    [InlineData("nbf-string")]
+    [InlineData("nbf-non-numeric")]
+    [InlineData("nbf-future")]
     public async Task Invalid_token_is_rejected(string invalidPart)
     {
         using var factory = new IntegrationTestFactory();
@@ -117,6 +132,16 @@ public sealed class JwtIntegrationTests
             "Bearer", CreateToken(invalidPart));
         var response = await client.GetAsync("/integration/protected");
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Nbf_inside_configured_clock_skew_is_accepted()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("nbf-skew"));
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/integration/protected")).StatusCode);
     }
 
     [Fact]
@@ -130,9 +155,34 @@ public sealed class JwtIntegrationTests
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/integration/role")).StatusCode);
     }
 
+    [Fact]
+    public async Task Tokens_signed_with_current_and_previous_configured_keys_are_accepted()
+    {
+        var settings = TestSettings.With(
+            ("Jwt:Keys:0:Kid", "aegis-primary-01"),
+            ("Jwt:Keys:0:Secret", TestSettings.Secret),
+            ("Jwt:Keys:0:Current", "true"),
+            ("Jwt:Keys:1:Kid", "aegis-previous-01"),
+            ("Jwt:Keys:1:Secret", "previous-integration-secret-with-at-least-32-bytes-012345"),
+            ("Jwt:Keys:1:Current", "false"));
+        using var factory = new IntegrationTestFactory(settings);
+        using var client = factory.CreateHttpsClient();
+
+        foreach (var key in new[] { ("aegis-primary-01", TestSettings.Secret), ("aegis-previous-01", "previous-integration-secret-with-at-least-32-bytes-012345") })
+        {
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateTokenWithKey(key.Item1, key.Item2));
+            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/integration/protected")).StatusCode);
+        }
+    }
+
     private static string CreateToken(string? invalidPart = null)
     {
         var now = DateTimeOffset.UtcNow.AddSeconds(-5);
+        if (invalidPart is "nbf-missing" or "nbf-string" or "nbf-non-numeric")
+        {
+            var nbf = invalidPart == "nbf-missing" ? null : invalidPart == "nbf-string" ? "now" : "not-a-number";
+            return CreateRawToken(now, now.AddMinutes(5), nbf, invalidPart == "nbf-missing");
+        }
         var issued = invalidPart == "iat-future" ? now.AddSeconds(60)
             : invalidPart == "iat-after-exp" ? now.AddMinutes(10)
             : invalidPart == "expired" ? now.AddMinutes(-2) : now;
@@ -152,13 +202,49 @@ public sealed class JwtIntegrationTests
         var credentials = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret)) { KeyId = keyId },
             invalidPart == "algorithm" ? SecurityAlgorithms.HmacSha512 : SecurityAlgorithms.HmacSha256);
-        var notBefore = invalidPart is "iat-after-exp" or "iat-future"
-            ? now.UtcDateTime : issued.UtcDateTime;
+        var notBefore = invalidPart == "nbf-future" ? now.AddSeconds(60).UtcDateTime
+            : invalidPart == "nbf-skew" ? now.AddSeconds(10).UtcDateTime
+            : invalidPart is "iat-after-exp" or "iat-future" ? now.UtcDateTime : issued.UtcDateTime;
         var token = new JwtSecurityToken(
             issuer, audience, claims,
             invalidPart == "exp-missing" ? null : notBefore,
             invalidPart == "exp-missing" ? null : expires.UtcDateTime, credentials);
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static string CreateRawToken(DateTimeOffset issued, DateTimeOffset expires, string? nbf, bool omitNbf)
+    {
+        var header = Base64Url(JsonSerializer.SerializeToUtf8Bytes(new { alg = "HS256", typ = "JWT", kid = "aegis-primary-01" }));
+        var payload = new Dictionary<string, object>
+        {
+            [JwtRegisteredClaimNames.Sub] = "integration-user",
+            [JwtRegisteredClaimNames.Iat] = issued.ToUnixTimeSeconds(),
+            [JwtRegisteredClaimNames.Exp] = expires.ToUnixTimeSeconds()
+        };
+        if (!omitNbf) payload[JwtRegisteredClaimNames.Nbf] = nbf!;
+        var encodedPayload = Base64Url(JsonSerializer.SerializeToUtf8Bytes(payload));
+        var unsigned = $"{header}.{encodedPayload}";
+        var signature = HMACSHA256.HashData(Encoding.UTF8.GetBytes(TestSettings.Secret), Encoding.UTF8.GetBytes(unsigned));
+        return $"{unsigned}.{Base64Url(signature)}";
+    }
+
+    private static string Base64Url(byte[] value) => Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static string CreateTokenWithKey(string kid, string secret)
+    {
+        var now = DateTimeOffset.UtcNow.AddSeconds(-5);
+        var header = Base64Url(JsonSerializer.SerializeToUtf8Bytes(new { alg = "HS256", typ = "JWT", kid }));
+        var payload = Base64Url(JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object>
+        {
+            [JwtRegisteredClaimNames.Iss] = "Aegis.Api",
+            [JwtRegisteredClaimNames.Aud] = "Aegis.Client",
+            [JwtRegisteredClaimNames.Sub] = "integration-user",
+            [JwtRegisteredClaimNames.Iat] = now.ToUnixTimeSeconds(),
+            [JwtRegisteredClaimNames.Nbf] = now.ToUnixTimeSeconds(),
+            [JwtRegisteredClaimNames.Exp] = now.AddMinutes(5).ToUnixTimeSeconds()
+        }));
+        var unsigned = $"{header}.{payload}";
+        return $"{unsigned}.{Base64Url(HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(unsigned)))}";
     }
 
 }
@@ -333,6 +419,49 @@ public sealed class RateLimitIntegrationTests
         using var client = factory.CreateHttpsClient();
         for (var i = 0; i < 6; i++)
             Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/integration/public")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Login_limit_is_per_account_across_ips_and_does_not_cross_accounts()
+    {
+        using var factory = new IntegrationTestFactory(TestSettings.With(
+            ("RateLimiting:LoginAccountPermitLimit", "2"),
+            ("RateLimiting:LoginIpPermitLimit", "20")));
+        using var client = factory.CreateHttpsClient();
+        var first = $"rate-first-{Guid.NewGuid():N}@example.com";
+        var second = $"rate-second-{Guid.NewGuid():N}@example.com";
+        const string password = "rate-password-123";
+
+        foreach (var email in new[] { first, second })
+        {
+            using var register = new HttpRequestMessage(HttpMethod.Post, "/auth/token/register")
+            {
+                Content = JsonContent.Create(new { email, password })
+            };
+            Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(register)).StatusCode);
+        }
+
+        foreach (var ip in new[] { "10.0.0.41", "10.0.0.42" })
+        {
+            using var login = Login(first, password, ip);
+            Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(login)).StatusCode);
+        }
+
+        using var blocked = Login(first, password, "10.0.0.43");
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await client.SendAsync(blocked)).StatusCode);
+
+        using var otherAccount = Login(second, password, "10.0.0.43");
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(otherAccount)).StatusCode);
+    }
+
+    private static HttpRequestMessage Login(string email, string password, string ip)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/token/login")
+        {
+            Content = JsonContent.Create(new { email, password })
+        };
+        request.Headers.Add("X-Test-Remote-IP", ip);
+        return request;
     }
 }
 
@@ -555,6 +684,75 @@ public sealed class AuthenticationFlowIntegrationTests
     }
 
     [Fact]
+    public async Task Browser_logout_clears_refresh_and_csrf_cookies()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        var email = $"browser-logout-{Guid.NewGuid():N}@example.com";
+        const string password = "browser-password-123";
+
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email, password);
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(register)).StatusCode);
+        using var login = Credentials(HttpMethod.Post, "/auth/browser/login", email, password);
+        login.Headers.Add("Origin", "https://localhost:5173");
+        var loggedIn = await client.SendAsync(login);
+        var csrf = JsonDocument.Parse(await loggedIn.Content.ReadAsStringAsync()).RootElement.GetProperty("csrfToken").GetString()!;
+        var refresh = CookieValue(loggedIn, "__Host-refresh-token");
+
+        using var logout = new HttpRequestMessage(HttpMethod.Post, "/auth/browser/logout");
+        logout.Headers.Add("Origin", "https://localhost:5173");
+        logout.Headers.Add("X-CSRF-TOKEN", csrf);
+        logout.Headers.Add("Cookie", $"__Host-refresh-token={refresh}; __Host-csrf-token={csrf}");
+        var response = await client.SendAsync(logout);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        AssertDeletedCookie(response, "__Host-refresh-token");
+        AssertDeletedCookie(response, "__Host-csrf-token");
+    }
+
+    [Fact]
+    public async Task Browser_terminal_refresh_failure_clears_refresh_and_csrf_cookies()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = new HttpClient(factory.Server.CreateHandler()) { BaseAddress = new Uri("https://localhost") };
+        var email = $"browser-terminal-refresh-{Guid.NewGuid():N}@example.com";
+        const string password = "browser-password-123";
+
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email, password);
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(register)).StatusCode);
+        using var login = Credentials(HttpMethod.Post, "/auth/browser/login", email, password);
+        login.Headers.Add("Origin", "https://localhost:5173");
+        var loggedIn = await client.SendAsync(login);
+        var csrf = JsonDocument.Parse(await loggedIn.Content.ReadAsStringAsync()).RootElement.GetProperty("csrfToken").GetString()!;
+        var csrfCookie = CookieValue(loggedIn, "__Host-csrf-token");
+        var refresh = CookieValue(loggedIn, "__Host-refresh-token");
+
+        using var firstRefresh = BrowserRefresh(refresh, csrf, csrfCookie);
+        var firstResponse = await client.SendAsync(firstRefresh);
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        var rotatedCsrf = JsonDocument.Parse(await firstResponse.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("csrfToken").GetString()!;
+        var rotatedCsrfCookie = csrfCookie;
+
+        using var terminalRefresh = BrowserRefresh(refresh, rotatedCsrf, rotatedCsrfCookie);
+        var response = await client.SendAsync(terminalRefresh);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertProblem(response, "RefreshTokenReuse", 401);
+        AssertDeletedCookie(response, "__Host-refresh-token");
+        AssertDeletedCookie(response, "__Host-csrf-token");
+    }
+
+    private static HttpRequestMessage BrowserRefresh(string refresh, string csrf, string csrfCookie)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/browser/refresh");
+        request.Headers.Add("Origin", "https://localhost:5173");
+        request.Headers.Add("X-CSRF-TOKEN", csrf);
+        request.Headers.Add("Cookie", $"__Host-refresh-token={refresh}; __Host-csrf-token={csrfCookie}");
+        return request;
+    }
+
+    [Fact]
     public async Task Token_register_login_and_refresh_return_refresh_json()
     {
         using var factory = new IntegrationTestFactory();
@@ -685,5 +883,12 @@ public sealed class AuthenticationFlowIntegrationTests
         Assert.Contains("SameSite=Strict", cookie, StringComparison.OrdinalIgnoreCase);
         if (httpOnly) Assert.Contains("HttpOnly", cookie, StringComparison.OrdinalIgnoreCase);
         else Assert.DoesNotContain("HttpOnly", cookie, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertDeletedCookie(HttpResponseMessage response, string name)
+    {
+        var cookie = response.Headers.GetValues("Set-Cookie")
+            .Single(value => value.StartsWith(name + "=", StringComparison.Ordinal));
+        Assert.Contains("expires=Thu, 01 Jan 1970", cookie, StringComparison.OrdinalIgnoreCase);
     }
 }
