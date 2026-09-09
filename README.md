@@ -14,8 +14,10 @@ Projeto desenhado para produção: configuração segura obrigatória por variá
 - [Pré-requisitos](#pré-requisitos)
 - [Quick start local](#quick-start-local)
 - [Configuração](#configuração)
+- [Usuários de teste em desenvolvimento](#usuários-de-teste-em-desenvolvimento)
 - [PostgreSQL e migrations](#postgresql-e-migrations)
 - [Redis e rate limiting](#redis-e-rate-limiting)
+- [Testes manuais com Swagger UI](#testes-manuais-com-swagger-ui)
 - [Endpoints](#endpoints)
 - [Segurança operacional](#segurança-operacional)
 - [Testes](#testes)
@@ -98,9 +100,11 @@ tests/
    export AllowedHosts="localhost;127.0.0.1"
    ```
 
-3. Aplique a migration (ver [PostgreSQL e migrations](#postgresql-e-migrations)).
+3. Opcionalmente, configure usuários de teste (ver [Usuários de teste em desenvolvimento](#usuários-de-teste-em-desenvolvimento)).
 
-4. Execute a API:
+4. Aplique a migration (ver [PostgreSQL e migrations](#postgresql-e-migrations)).
+
+5. Execute a API:
 
    ```bash
    dotnet run --project src/Aegis.Api
@@ -109,7 +113,7 @@ tests/
    - HTTP: `http://localhost:5222`
    - HTTPS: `https://localhost:7083`
 
-5. Para desenvolvimento, o OpenAPI/Swagger fica disponível apenas com o perfil `Development`.
+6. Em desenvolvimento, abra `https://localhost:7083/swagger` para explorar e testar endpoints. Use botão `Authorize` e informe somente access token JWT; OpenAPI/Swagger não ficam disponíveis em produção.
 
 ## Configuração
 
@@ -145,16 +149,56 @@ Toda configuração é resolvida por `appsettings.json` + variáveis de ambiente
 | `Argon2:HashBytes` | `32` | ≥ 16 |
 | `ReverseProxy:Enabled` | `false` | Quando habilitado, exige `ReverseProxy:KnownProxies` válidos |
 
+## Usuários de teste em desenvolvimento
+
+Em `Development`, API pode criar automaticamente conta comum e conta administradora. Recurso fica desativado por padrão e nunca deve ser habilitado em produção.
+
+Cada integrante deve configurar valores privados na própria máquina, usando User Secrets:
+
+```bash
+dotnet user-secrets set "DevelopmentSeed:Enabled" "true" --project src/Aegis.Api
+dotnet user-secrets set "DevelopmentSeed:UserEmail" "user@aegis.local" --project src/Aegis.Api
+dotnet user-secrets set "DevelopmentSeed:UserPassword" "SENHA_PRIVADA_DO_USUARIO" --project src/Aegis.Api
+dotnet user-secrets set "DevelopmentSeed:AdminEmail" "admin@aegis.local" --project src/Aegis.Api
+dotnet user-secrets set "DevelopmentSeed:AdminPassword" "SENHA_PRIVADA_DO_ADMIN" --project src/Aegis.Api
+```
+
+Após iniciar API, contas ficam disponíveis para login:
+
+| Nível | E-mail |
+|---|---|
+| Usuário comum | `user@aegis.local` |
+| Administrador | `admin@aegis.local` |
+
+Senhas não são incluídas no repositório. Compartilhe por canal privado ou cada integrante cria próprias senhas. Reiniciar API não duplica contas existentes.
+
 ## PostgreSQL e migrations
 
 As tabelas são criadas por migrations do EF Core. **Migrations não são aplicadas automaticamente no startup** — execute manualmente antes de rodar a aplicação.
+
+Para ambiente local com Docker:
+
+```bash
+docker run -d --name aegis-postgres \
+  -e POSTGRES_DB=aegis \
+  -e POSTGRES_USER=aegis \
+  -e POSTGRES_PASSWORD=aegis-local-password \
+  -p 5432:5432 \
+  postgres:16-alpine
+
+docker run -d --name aegis-redis \
+  -p 6379:6379 \
+  redis:7-alpine
+```
+
+Em próximas execuções, use `docker start aegis-postgres aegis-redis`.
 
 Tabelas gerenciadas: `users`, `sessions`, `refresh_tokens`, `audit_events`.
 
 Para aplicar a migration:
 
 ```bash
-dotnet ef database update --project src/Aegis.Infrastructure
+dotnet ef database update --project src/Aegis.Infrastructure --startup-project src/Aegis.Infrastructure
 ```
 
 > O design-time factory usa a conexão `Host=localhost;Database=aegis;Username=aegis;Password=design-time`. Ajuste o arquivo `AegisDbContextFactory` para seu ambiente se necessário.
@@ -176,6 +220,29 @@ Políticas aplicadas (valores padrão):
 | `LoginByIp` | Login por IP | 5 | 60 s |
 | `OtherOperationByIp` | Demais operações por IP | 5 | 60 s |
 | Limite por conta | Login por conta (HMAC do e-mail) | 5 | 60 s |
+
+## Testes manuais com Swagger UI
+
+Swagger UI está disponível somente em `Development`. Com a API ativa, abra:
+
+```text
+https://localhost:7083/swagger
+```
+
+Fluxo recomendado:
+
+1. Execute `POST /auth/token/register` com e-mail novo e senha de pelo menos 12 caracteres.
+2. Copie `accessToken` e `refreshToken` da resposta.
+3. Clique em `Authorize` e informe somente `accessToken`; não inclua `Bearer`.
+4. Execute `GET /api/auth/me` para validar autenticação.
+5. Execute `POST /auth/token/refresh` com refresh token mais recente.
+6. Execute `POST /auth/token/logout` com refresh token mais recente; resposta esperada é `204`.
+
+Para testar contas seed, faça login em `POST /auth/token/login` com e-mail `user@aegis.local` ou `admin@aegis.local` e senha privada configurada no seu User Secrets. Não há endpoint administrativo exposto atualmente; campo `role` em `/api/auth/me` confirma nível da conta.
+
+Endpoints `/auth/browser/*` exigem origem permitida, cookie seguro e token CSRF. Teste-os por frontend ou `curl`; Swagger UI não é adequado para esse fluxo.
+
+Login possui limite padrão de 5 tentativas por minuto, por IP e por conta. Se receber `429`, aguarde 60 segundos.
 
 ## Endpoints
 
@@ -304,8 +371,8 @@ Checklist de produção:
 - **Sem endpoint de health/readiness** — apenas readiness implícito no startup.
 - **Sem Dockerfile, docker-compose e CI** no repositório.
 - **JWT fixo em HS256** — a validação rejeita outros algoritmos.
-- **Usuário criado sempre com role `user`** — não há seed de admin.
-- **OpenAPI disponível apenas em desenvolvimento**.
+- **Seed disponível somente em Development** — cria usuário e administrador quando habilitado.
+- **OpenAPI e Swagger UI disponíveis apenas em desenvolvimento**.
 - **Uma sessão ativa por refresh token** — sem suporte a múltiplas sessões simultâneas.
 - **Sem CRUD além de auth e `me`** — `ChangePasswordUseCase` e `DeactivateUserUseCase` estão registrados no DI, mas sem controller exposto.
 - **CORS com uma origem por padrão** — ampliar conforme necessário.
