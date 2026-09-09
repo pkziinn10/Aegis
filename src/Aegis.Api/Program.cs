@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi;
 using Aegis.Application;
 using Aegis.Infrastructure;
 
@@ -22,7 +23,21 @@ builder.Services.AddControllers().AddJsonOptions(options =>
     .ConfigureApiBehaviorOptions(options =>
     options.InvalidModelStateResponseFactory = context =>
         ApiErrors.From(context.HttpContext, Aegis.Application.Results.ApplicationErrorCode.InvalidRequest));
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Components ??= new OpenApiComponents();
+        document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+        document.Components.SecuritySchemes["Bearer"] = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT",
+            In = ParameterLocation.Header,
+            Description = "JWT Bearer token"
+        };
+        return Task.CompletedTask;
+    }));
 builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-CSRF-TOKEN";
@@ -143,6 +158,8 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+await DevelopmentUserSeeder.SeedAsync(app.Services, builder.Configuration, app.Environment);
+
 app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
 {
     var error = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
@@ -174,6 +191,7 @@ if (reverseProxyOptions.Enabled)
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "Aegis API v1"));
 }
 else
 {
