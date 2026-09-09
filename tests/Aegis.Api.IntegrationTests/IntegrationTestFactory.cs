@@ -98,6 +98,7 @@ public static class TestSettings
         ["Jwt:ClockSkewSeconds"] = "30",
         ["Cors:AllowedOrigins:0"] = "https://localhost:5173",
         ["ReverseProxy:Enabled"] = "false",
+        ["DevelopmentSeed:Enabled"] = "false",
         ["AllowedHosts"] = "localhost;127.0.0.1"
     };
 

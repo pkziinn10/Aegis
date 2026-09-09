@@ -371,7 +371,7 @@ Checklist de produção:
 - **Sem endpoint de health/readiness** — apenas readiness implícito no startup.
 - **Sem Dockerfile, docker-compose e CI** no repositório.
 - **JWT fixo em HS256** — a validação rejeita outros algoritmos.
-- **Usuário criado sempre com role `user`** — não há seed de admin.
+- **Seed disponível somente em Development** — cria usuário e administrador quando habilitado.
 - **OpenAPI e Swagger UI disponíveis apenas em desenvolvimento**.
 - **Uma sessão ativa por refresh token** — sem suporte a múltiplas sessões simultâneas.
 - **Sem CRUD além de auth e `me`** — `ChangePasswordUseCase` e `DeactivateUserUseCase` estão registrados no DI, mas sem controller exposto.
