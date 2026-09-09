@@ -1,0 +1,38 @@
+# Documentação local
+.docs/
+
+# Artefatos .NET
+[Bb]in/
+[Oo]bj/
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+# IDEs e arquivos de usuário
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Logs e arquivos temporários
+*.log
+*.tmp
+*.bak
+
+# Segredos locais
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+appsettings.Local.json
+appsettings.*.local.json
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
