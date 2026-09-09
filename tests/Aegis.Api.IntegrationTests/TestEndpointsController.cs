@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Http;
 
 namespace Aegis.Api.IntegrationTests;
 
@@ -37,4 +38,5 @@ public sealed class TestEndpointsController : ControllerBase
         Response.Cookies.Append("integration", "value");
         return NoContent();
     }
+
 }

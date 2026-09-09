@@ -18,7 +18,9 @@ public sealed class IntegrationTestFactory : WebApplicationFactory<Program>
     {
         EnvironmentName = environment;
         PostgresContainerFixture.Current.ResetDatabaseAsync().GetAwaiter().GetResult();
-        _settings = settings ?? TestSettings.Valid();
+        var resolved = settings is null ? TestSettings.Valid() : new Dictionary<string, string?>(settings);
+        if (settings is null) resolved["RateLimiting:KeyPrefix"] = Guid.NewGuid().ToString("N");
+        _settings = resolved;
         foreach (var setting in _settings)
         {
             var key = setting.Key.Replace(":", "__", StringComparison.Ordinal);
@@ -84,6 +86,8 @@ public static class TestSettings
     public static Dictionary<string, string?> Valid(string? secret = null) => new()
     {
         ["ConnectionStrings:Aegis"] = PostgresContainerFixture.Current.ConnectionString,
+        ["RateLimiting:RedisConnection"] = PostgresContainerFixture.Current.RedisConnectionString,
+        ["RateLimiting:KeyPrefix"] = Guid.NewGuid().ToString("N"),
         ["Jwt:SecretKey"] = secret ?? Secret,
         ["Jwt:Algorithm"] = "HS256",
         ["Jwt:Issuer"] = "Aegis.Api",

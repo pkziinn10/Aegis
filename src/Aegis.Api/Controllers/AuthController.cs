@@ -9,11 +9,26 @@ using Microsoft.AspNetCore.RateLimiting;
 
 namespace Aegis.Api.Controllers;
 
-public sealed record CredentialsRequest(string Email, string Password);
-public sealed record RefreshRequest(string RefreshToken);
-public sealed record BrowserSessionResponse(Guid UserId, string Email, string Role, string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string CsrfToken);
-public sealed record TokenSessionResponse(Guid UserId, string Email, string Role, string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string RefreshToken);
-public sealed record TokenResponse(string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string RefreshToken);
+public sealed record CredentialsRequest(string Email, string Password)
+{
+    public override string ToString() => nameof(CredentialsRequest);
+}
+public sealed record RefreshRequest(string RefreshToken)
+{
+    public override string ToString() => nameof(RefreshRequest);
+}
+public sealed record BrowserSessionResponse(Guid UserId, string Email, string Role, string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string CsrfToken)
+{
+    public override string ToString() => nameof(BrowserSessionResponse);
+}
+public sealed record TokenSessionResponse(Guid UserId, string Email, string Role, string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string RefreshToken)
+{
+    public override string ToString() => nameof(TokenSessionResponse);
+}
+public sealed record TokenResponse(string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string RefreshToken)
+{
+    public override string ToString() => nameof(TokenResponse);
+}
 public sealed record UserResponse(Guid Id, string Email, string Role);
 
 internal static class AuthPayloadLimits
@@ -35,7 +50,7 @@ public sealed class AuthController(
     private const string RefreshCookie = "__Host-refresh-token";
 
     [HttpPost("browser/register")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.OtherOperationByIp)]
     [RequestSizeLimit(AuthPayloadLimits.CredentialsBytes)]
     public async Task<IActionResult> BrowserRegister(CredentialsRequest? request, CancellationToken ct)
     {
@@ -47,7 +62,8 @@ public sealed class AuthController(
     }
 
     [HttpPost("browser/login")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.LoginByIp)]
+    [ServiceFilter(typeof(AccountRateLimitFilter))]
     [RequestSizeLimit(AuthPayloadLimits.CredentialsBytes)]
     public async Task<IActionResult> BrowserLogin(CredentialsRequest? request, CancellationToken ct)
     {
@@ -59,35 +75,55 @@ public sealed class AuthController(
     }
 
     [HttpPost("browser/refresh")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.OtherOperationByIp)]
     [RequestSizeLimit(AuthPayloadLimits.RefreshBytes)]
     public async Task<IActionResult> BrowserRefresh(CancellationToken ct)
     {
         NoStore();
         if (!await ValidateOriginAsync() || !await ValidateCsrfAsync()) return ApiErrors.Forbidden(this, ApplicationErrorCode.InvalidRequest);
-        if (!Request.Cookies.TryGetValue(RefreshCookie, out var value) || string.IsNullOrWhiteSpace(value)) return ApiErrors.From(this, ApplicationErrorCode.InvalidCredentials);
+        if (!Request.Cookies.TryGetValue(RefreshCookie, out var value) || string.IsNullOrWhiteSpace(value))
+        {
+            DeleteAuthCookies();
+            return ApiErrors.From(this, ApplicationErrorCode.InvalidCredentials);
+        }
         var result = await refresh.ExecuteAsync(new RefreshCommand(value), ct);
-        if (result.IsFailure) return ApiErrors.From(this, result.ErrorCode);
+        if (result.IsFailure)
+        {
+            if (BrowserCookiePolicy.IsTerminalRefreshFailure(result.ErrorCode)) DeleteAuthCookies();
+            return ApiErrors.From(this, result.ErrorCode);
+        }
         SetRefreshCookie(result.Value!.RefreshToken.Value);
         return BrowserToken(result.Value, await IssueCsrfTokenAsync());
     }
 
     [HttpPost("browser/logout")]
+    [EnableRateLimiting(SecurityPolicyNames.OtherOperationByIp)]
     public async Task<IActionResult> BrowserLogout(CancellationToken ct)
     {
         NoStore();
         if (!await ValidateOriginAsync() || !await ValidateCsrfAsync()) return ApiErrors.Forbidden(this, ApplicationErrorCode.InvalidRequest);
-        if (Request.Cookies.TryGetValue(RefreshCookie, out var value) && !string.IsNullOrWhiteSpace(value))
+        try
         {
-            var result = await logout.ExecuteAsync(new LogoutCommand(value), ct);
-            if (result.IsFailure) return ApiErrors.From(this, result.ErrorCode);
+            if (Request.Cookies.TryGetValue(RefreshCookie, out var value) && !string.IsNullOrWhiteSpace(value))
+            {
+                var result = await logout.ExecuteAsync(new LogoutCommand(value), ct);
+                if (result.IsFailure) return ApiErrors.From(this, result.ErrorCode);
+            }
+            return NoContent();
         }
-        Response.Cookies.Delete(RefreshCookie, new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" });
-        return NoContent();
+        catch
+        {
+            DeleteAuthCookies();
+            return ApiErrors.From(HttpContext, ApplicationErrorCode.InvalidPasswordHash);
+        }
+        finally
+        {
+            DeleteAuthCookies();
+        }
     }
 
     [HttpPost("token/register")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.OtherOperationByIp)]
     [RequestSizeLimit(AuthPayloadLimits.CredentialsBytes)]
     public async Task<IActionResult> TokenRegister(CredentialsRequest? request, CancellationToken ct)
     {
@@ -96,7 +132,8 @@ public sealed class AuthController(
     }
 
     [HttpPost("token/login")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.LoginByIp)]
+    [ServiceFilter(typeof(AccountRateLimitFilter))]
     [RequestSizeLimit(AuthPayloadLimits.CredentialsBytes)]
     public async Task<IActionResult> TokenLogin(CredentialsRequest? request, CancellationToken ct)
     {
@@ -105,7 +142,7 @@ public sealed class AuthController(
     }
 
     [HttpPost("token/refresh")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.OtherOperationByIp)]
     [RequestSizeLimit(AuthPayloadLimits.RefreshBytes)]
     public async Task<IActionResult> TokenRefresh(RefreshRequest? request, CancellationToken ct)
     {
@@ -114,7 +151,7 @@ public sealed class AuthController(
     }
 
     [HttpPost("token/logout")]
-    [EnableRateLimiting(SecurityPolicyNames.AuthByIp)]
+    [EnableRateLimiting(SecurityPolicyNames.OtherOperationByIp)]
     [RequestSizeLimit(AuthPayloadLimits.RefreshBytes)]
     public async Task<IActionResult> TokenLogout(RefreshRequest? request, CancellationToken ct)
     {
@@ -133,6 +170,22 @@ public sealed class AuthController(
     private void NoStore() => Response.Headers.CacheControl = "no-store";
     private IActionResult NoStore(IActionResult result) { NoStore(); return result; }
     private void SetRefreshCookie(string value) => Response.Cookies.Append(RefreshCookie, value, new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" });
+    private void DeleteAuthCookies() => BrowserCookiePolicy.Delete(Response);
+}
+
+public static class BrowserCookiePolicy
+{
+    public static bool IsTerminalRefreshFailure(ApplicationErrorCode code) => code is
+        ApplicationErrorCode.InvalidCredentials or ApplicationErrorCode.InvalidRefreshToken or
+        ApplicationErrorCode.RefreshTokenReuse or ApplicationErrorCode.SessionExpired or
+        ApplicationErrorCode.SessionRevoked;
+
+    public static void Delete(HttpResponse response)
+    {
+        var options = new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" };
+        response.Cookies.Delete("__Host-refresh-token", options);
+        response.Cookies.Delete("__Host-csrf-token", options);
+    }
 }
 
 [ApiController]
