@@ -89,7 +89,7 @@ public sealed class AuthController(
         var result = await refresh.ExecuteAsync(new RefreshCommand(value), ct);
         if (result.IsFailure)
         {
-            DeleteAuthCookies();
+            if (BrowserCookiePolicy.IsTerminalRefreshFailure(result.ErrorCode)) DeleteAuthCookies();
             return ApiErrors.From(this, result.ErrorCode);
         }
         SetRefreshCookie(result.Value!.RefreshToken.Value);
@@ -110,6 +110,11 @@ public sealed class AuthController(
                 if (result.IsFailure) return ApiErrors.From(this, result.ErrorCode);
             }
             return NoContent();
+        }
+        catch
+        {
+            DeleteAuthCookies();
+            return ApiErrors.From(HttpContext, ApplicationErrorCode.InvalidPasswordHash);
         }
         finally
         {
@@ -165,11 +170,21 @@ public sealed class AuthController(
     private void NoStore() => Response.Headers.CacheControl = "no-store";
     private IActionResult NoStore(IActionResult result) { NoStore(); return result; }
     private void SetRefreshCookie(string value) => Response.Cookies.Append(RefreshCookie, value, new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" });
-    private void DeleteAuthCookies()
+    private void DeleteAuthCookies() => BrowserCookiePolicy.Delete(Response);
+}
+
+public static class BrowserCookiePolicy
+{
+    public static bool IsTerminalRefreshFailure(ApplicationErrorCode code) => code is
+        ApplicationErrorCode.InvalidCredentials or ApplicationErrorCode.InvalidRefreshToken or
+        ApplicationErrorCode.RefreshTokenReuse or ApplicationErrorCode.SessionExpired or
+        ApplicationErrorCode.SessionRevoked;
+
+    public static void Delete(HttpResponse response)
     {
         var options = new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" };
-        Response.Cookies.Delete(RefreshCookie, options);
-        Response.Cookies.Delete("__Host-csrf-token", options);
+        response.Cookies.Delete("__Host-refresh-token", options);
+        response.Cookies.Delete("__Host-csrf-token", options);
     }
 }
 

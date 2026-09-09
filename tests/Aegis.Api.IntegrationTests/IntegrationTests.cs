@@ -31,6 +31,16 @@ internal static class IntegrationTestEnvironment
 public sealed class StartupConfigurationTests
 {
     [Theory]
+    [InlineData(null)]
+    [InlineData("not-a-redis-connection")]
+    public void Missing_or_invalid_redis_configuration_fails_startup(string? connection)
+    {
+        using var factory = new IntegrationTestFactory(TestSettings.With(("RateLimiting:RedisConnection", connection)));
+        var exception = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+        Assert.Contains("RateLimiting:RedisConnection", Flatten(exception));
+    }
+
+    [Theory]
     [InlineData("Jwt:SecretKey", "", "JWT secret")]
     [InlineData("Jwt:SecretKey", "short", "JWT secret")]
     [InlineData("Jwt:Algorithm", "HS512", "Only HS256")]
@@ -381,6 +391,80 @@ public sealed class WebSecurityIntegrationTests
 [Collection("Postgres")]
 public sealed class RateLimitIntegrationTests
 {
+    [Fact]
+    public async Task Ip_limit_is_shared_by_two_factories_with_same_prefix()
+    {
+        var settings = TestSettings.With(
+            ("RateLimiting:KeyPrefix", $"shared-ip-{Guid.NewGuid():N}"),
+            ("RateLimiting:OtherIpPermitLimit", "2"),
+            ("RateLimiting:WindowSeconds", "30"));
+        using var first = new IntegrationTestFactory(settings);
+        using var second = new IntegrationTestFactory(settings);
+        using var firstClient = first.CreateHttpsClient();
+        using var secondClient = second.CreateHttpsClient();
+
+        for (var i = 0; i < 2; i++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
+            request.Headers.Add("X-Test-Remote-IP", "192.0.2.40");
+            var client = i == 0 ? firstClient : secondClient;
+            Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(request)).StatusCode);
+        }
+
+        using var rejected = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
+        rejected.Headers.Add("X-Test-Remote-IP", "192.0.2.40");
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await firstClient.SendAsync(rejected)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Account_limit_is_shared_by_two_factories_with_same_prefix()
+    {
+        var settings = TestSettings.With(
+            ("RateLimiting:KeyPrefix", $"shared-account-{Guid.NewGuid():N}"),
+            ("RateLimiting:LoginAccountPermitLimit", "2"),
+            ("RateLimiting:LoginIpPermitLimit", "20"));
+        using var first = new IntegrationTestFactory(settings);
+        using var second = new IntegrationTestFactory(settings);
+        using var firstClient = first.CreateHttpsClient();
+        using var secondClient = second.CreateHttpsClient();
+        var email = $"shared-account-{Guid.NewGuid():N}@example.com";
+        const string password = "shared-account-password-123";
+
+        using var register = new HttpRequestMessage(HttpMethod.Post, "/auth/token/register")
+        { Content = JsonContent.Create(new { email, password }) };
+        Assert.Equal(HttpStatusCode.OK, (await firstClient.SendAsync(register)).StatusCode);
+
+        using var firstLogin = Login(email, password, "192.0.2.41");
+        using var secondLogin = Login(email, password, "192.0.2.42");
+        Assert.Equal(HttpStatusCode.OK, (await firstClient.SendAsync(firstLogin)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await secondClient.SendAsync(secondLogin)).StatusCode);
+
+        using var rejected = Login(email, password, "192.0.2.43");
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await firstClient.SendAsync(rejected)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Redis_fixed_window_expires_and_allows_new_request()
+    {
+        using var factory = new IntegrationTestFactory(TestSettings.With(
+            ("RateLimiting:KeyPrefix", $"short-window-{Guid.NewGuid():N}"),
+            ("RateLimiting:OtherIpPermitLimit", "1"),
+            ("RateLimiting:WindowSeconds", "1")));
+        using var client = factory.CreateHttpsClient();
+
+        using var first = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
+        first.Headers.Add("X-Test-Remote-IP", "192.0.2.44");
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(first)).StatusCode);
+        using var blocked = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
+        blocked.Headers.Add("X-Test-Remote-IP", "192.0.2.44");
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await client.SendAsync(blocked)).StatusCode);
+
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        using var afterExpiry = new HttpRequestMessage(HttpMethod.Post, "/integration/limited");
+        afterExpiry.Headers.Add("X-Test-Remote-IP", "192.0.2.44");
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(afterExpiry)).StatusCode);
+    }
+
     [Fact]
     public async Task AuthByIp_allows_five_and_rejects_sixth_request()
     {

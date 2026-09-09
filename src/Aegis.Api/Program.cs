@@ -2,8 +2,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
+using StackExchange.Redis;
 using Aegis.Api;
 using Aegis.Api.Configuration;
+using Aegis.Api.Controllers;
 using Aegis.Api.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.CookiePolicy;
@@ -64,8 +66,24 @@ if (!CorsOptions.IsValid(corsOptions))
 var accountKeySecret = builder.Configuration["RateLimiting:AccountKeySecret"];
 if (string.IsNullOrWhiteSpace(accountKeySecret) || Encoding.UTF8.GetByteCount(accountKeySecret) < 32)
     throw new InvalidOperationException("RateLimiting:AccountKeySecret must be supplied by environment and contain at least 32 UTF-8 bytes.");
-builder.Services.AddSingleton(serviceProvider =>
-    new AccountRateLimiter(serviceProvider.GetRequiredService<IConfiguration>(), accountKeySecret));
+var redisConnection = builder.Configuration["RateLimiting:RedisConnection"];
+if (string.IsNullOrWhiteSpace(redisConnection))
+    throw new InvalidOperationException("RateLimiting:RedisConnection must be supplied in every environment.");
+ConfigurationOptions redisOptions;
+try
+{
+    redisOptions = ConfigurationOptions.Parse(redisConnection);
+    redisOptions.AbortOnConnectFail = true;
+    using var startupRedis = ConnectionMultiplexer.Connect(redisOptions);
+    startupRedis.GetDatabase().Ping();
+}
+catch (Exception exception)
+{
+    throw new InvalidOperationException("RateLimiting:RedisConnection is invalid or Redis is unavailable.", exception);
+}
+builder.Services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisOptions));
+builder.Services.AddSingleton(serviceProvider => new RedisRateLimitStore(serviceProvider.GetRequiredService<IConnectionMultiplexer>(), accountKeySecret, serviceProvider.GetRequiredService<IConfiguration>()));
+builder.Services.AddSingleton(serviceProvider => new AccountRateLimiter(serviceProvider.GetRequiredService<RedisRateLimitStore>(), serviceProvider.GetRequiredService<IConfiguration>()));
 
 var allowedHosts = builder.Configuration["AllowedHosts"];
 if (!AllowedHostsOptions.IsValid(allowedHosts))
@@ -114,25 +132,13 @@ builder.Services.AddRateLimiter(options =>
     var loginIpLimit = Math.Clamp(builder.Configuration.GetValue("RateLimiting:LoginIpPermitLimit", 5), 1, 1000);
     var otherIpLimit = Math.Clamp(builder.Configuration.GetValue("RateLimiting:OtherIpPermitLimit", 5), 1, 1000);
 
-    // In-memory limiter: state is local to each API process and is not durable.
-    static FixedWindowRateLimiterOptions Fixed(int limit, TimeSpan window) => new()
-    {
-        PermitLimit = limit,
-        Window = window,
-        QueueLimit = 0,
-        AutoReplenishment = true
-    };
-
-    options.AddPolicy(SecurityPolicyNames.AuthByIp, context =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => Fixed(otherIpLimit, window)));
-    options.AddPolicy(SecurityPolicyNames.OtherOperationByIp, context =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => Fixed(otherIpLimit, window)));
-    options.AddPolicy(SecurityPolicyNames.LoginByIp, context =>
-        RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => Fixed(loginIpLimit, window)));
+    static string Ip(HttpContext context) => context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    options.AddPolicy<string>(SecurityPolicyNames.AuthByIp, context =>
+        new RedisRateLimiterPolicy(context.RequestServices.GetRequiredService<RedisRateLimitStore>(), context.RequestServices.GetRequiredService<IHttpContextAccessor>(), otherIpLimit, (int)window.TotalSeconds, "ip-auth", Ip).GetPartition(context));
+    options.AddPolicy<string>(SecurityPolicyNames.OtherOperationByIp, context =>
+        new RedisRateLimiterPolicy(context.RequestServices.GetRequiredService<RedisRateLimitStore>(), context.RequestServices.GetRequiredService<IHttpContextAccessor>(), otherIpLimit, (int)window.TotalSeconds, "ip-other", Ip).GetPartition(context));
+    options.AddPolicy<string>(SecurityPolicyNames.LoginByIp, context =>
+        new RedisRateLimiterPolicy(context.RequestServices.GetRequiredService<RedisRateLimitStore>(), context.RequestServices.GetRequiredService<IHttpContextAccessor>(), loginIpLimit, (int)window.TotalSeconds, "ip-login", Ip).GetPartition(context));
 });
 
 var app = builder.Build();
