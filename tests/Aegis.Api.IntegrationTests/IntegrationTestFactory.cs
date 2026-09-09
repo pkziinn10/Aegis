@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 
@@ -10,7 +11,6 @@ namespace Aegis.Api.IntegrationTests;
 public sealed class IntegrationTestFactory : WebApplicationFactory<Program>
 {
     private readonly IReadOnlyDictionary<string, string?> _settings;
-    private readonly Dictionary<string, string?> _previousEnvironment = new();
 
     public IntegrationTestFactory(
         IReadOnlyDictionary<string, string?>? settings = null,
@@ -20,23 +20,27 @@ public sealed class IntegrationTestFactory : WebApplicationFactory<Program>
         PostgresContainerFixture.Current.ResetDatabaseAsync().GetAwaiter().GetResult();
         var resolved = settings is null ? TestSettings.Valid() : new Dictionary<string, string?>(settings);
         if (settings is null) resolved["RateLimiting:KeyPrefix"] = Guid.NewGuid().ToString("N");
+        resolved["https_port"] = "443";
         _settings = resolved;
-        foreach (var setting in _settings)
-        {
-            var key = setting.Key.Replace(":", "__", StringComparison.Ordinal);
-            _previousEnvironment[key] = Environment.GetEnvironmentVariable(key);
-            Environment.SetEnvironmentVariable(key, setting.Value);
-        }
     }
 
     public string EnvironmentName { get; }
 
-    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    protected override IHost CreateHost(IHostBuilder builder)
     {
         builder.UseEnvironment(EnvironmentName);
-        builder.UseSetting("https_port", "443");
-        builder.ConfigureAppConfiguration((_, configuration) =>
+        builder.ConfigureHostConfiguration(configuration =>
             configuration.AddInMemoryCollection(_settings));
+        return base.CreateHost(builder);
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureAppConfiguration((_, configuration) =>
+        {
+            configuration.Sources.Clear();
+            configuration.AddInMemoryCollection(_settings);
+        });
         builder.ConfigureServices(services =>
         {
             services.AddControllers().AddApplicationPart(typeof(TestEndpointsController).Assembly);
@@ -53,13 +57,6 @@ public sealed class IntegrationTestFactory : WebApplicationFactory<Program>
         });
     }
 
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-            foreach (var setting in _previousEnvironment)
-                Environment.SetEnvironmentVariable(setting.Key, setting.Value);
-        base.Dispose(disposing);
-    }
 }
 
 internal sealed class TestSchemeStartupFilter : IStartupFilter
@@ -87,6 +84,7 @@ public static class TestSettings
     {
         ["ConnectionStrings:Aegis"] = PostgresContainerFixture.Current.ConnectionString,
         ["RateLimiting:RedisConnection"] = PostgresContainerFixture.Current.RedisConnectionString,
+        ["RateLimiting:AccountKeySecret"] = Secret,
         ["RateLimiting:KeyPrefix"] = Guid.NewGuid().ToString("N"),
         ["Jwt:SecretKey"] = secret ?? Secret,
         ["Jwt:Algorithm"] = "HS256",
