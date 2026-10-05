@@ -13,7 +13,10 @@ public enum DomainErrorCode
     SessionExpired,
     SessionRevoked,
     RefreshTokenNotInSession,
-    ReplacementAlreadyKnown
+    ReplacementAlreadyKnown,
+    InvalidPassword,
+    AccountInactive,
+    UserAlreadyDeactivated
 }
 
 public class DomainResult

@@ -713,6 +713,24 @@ public sealed record RateLimitProblem(string Title, int Status);
 [Collection("Postgres")]
 public sealed class AuthenticationFlowIntegrationTests
 {
+    [Theory]
+    [InlineData(11, HttpStatusCode.BadRequest)]
+    [InlineData(12, HttpStatusCode.OK)]
+    public async Task Token_register_characterizes_password_length_boundary(int passwordLength, HttpStatusCode expectedStatus)
+    {
+        using var factory = new IntegrationTestFactory();
+        using var client = factory.CreateHttpsClient();
+        using var request = Credentials(HttpMethod.Post, "/auth/token/register", $"boundary-{Guid.NewGuid():N}@example.com", new string('p', passwordLength));
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(expectedStatus, response.StatusCode);
+        if (passwordLength == 11)
+            AssertProblem(response, "WeakPassword", 400);
+        else
+            Assert.NotNull(JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("refreshToken").GetString());
+    }
+
     [Fact]
     public async Task Browser_register_emits_host_refresh_and_csrf_cookies_without_refresh_body()
     {
@@ -879,6 +897,52 @@ public sealed class AuthenticationFlowIntegrationTests
         await using var db = PostgresContainerFixture.Current.CreateDbContext();
         var session = await db.Sessions.Include(x => x.RefreshTokens)
             .SingleAsync(x => x.RefreshTokens.Any(t => t.Hash == Hash(loginRefresh!)));
+        Assert.NotNull(session.RevokedAt);
+        Assert.Equal((int)Aegis.Domain.Enums.SessionRevocationReason.RefreshTokenReuse, session.RevocationReason);
+        Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));
+    }
+
+    [Fact]
+    public async Task Concurrent_refresh_rotation_yields_one_success_and_one_family_reuse_detection()
+    {
+        using var factory = new IntegrationTestFactory();
+        using var firstClient = factory.CreateHttpsClient();
+        using var secondClient = factory.CreateHttpsClient();
+        var email = $"concurrent-refresh-{Guid.NewGuid():N}@example.com";
+
+        using var register = Credentials(HttpMethod.Post, "/auth/token/register", email);
+        var registered = await firstClient.SendAsync(register);
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        var refreshToken = JsonDocument.Parse(await registered.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("refreshToken").GetString()!;
+
+        var firstReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<HttpResponseMessage> Refresh(HttpClient client, TaskCompletionSource<bool> ready)
+        {
+            ready.SetResult(true);
+            await release.Task;
+            return await client.SendAsync(new HttpRequestMessage(HttpMethod.Post, "/auth/token/refresh")
+            {
+                Content = JsonContent.Create(new { refreshToken })
+            });
+        }
+
+        var first = Refresh(firstClient, firstReady);
+        var second = Refresh(secondClient, secondReady);
+        await Task.WhenAll(firstReady.Task, secondReady.Task);
+        release.SetResult(true);
+        var responses = await Task.WhenAll(first, second);
+
+        Assert.Single(responses, response => response.StatusCode == HttpStatusCode.OK);
+        var reused = Assert.Single(responses, response => response.StatusCode == HttpStatusCode.Unauthorized);
+        AssertProblem(reused, "RefreshTokenReuse", 401);
+
+        await using var db = PostgresContainerFixture.Current.CreateDbContext();
+        var session = await db.Sessions.Include(x => x.RefreshTokens)
+            .SingleAsync(x => x.RefreshTokens.Any(t => t.Hash == Hash(refreshToken)));
         Assert.NotNull(session.RevokedAt);
         Assert.Equal((int)Aegis.Domain.Enums.SessionRevocationReason.RefreshTokenReuse, session.RevocationReason);
         Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));

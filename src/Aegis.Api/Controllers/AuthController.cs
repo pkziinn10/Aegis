@@ -9,34 +9,11 @@ using Microsoft.AspNetCore.RateLimiting;
 
 namespace Aegis.Api.Controllers;
 
-public sealed record CredentialsRequest(string Email, string Password)
-{
-    public override string ToString() => nameof(CredentialsRequest);
-}
-public sealed record RefreshRequest(string RefreshToken)
-{
-    public override string ToString() => nameof(RefreshRequest);
-}
-public sealed record BrowserSessionResponse(Guid UserId, string Email, string Role, string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string CsrfToken)
-{
-    public override string ToString() => nameof(BrowserSessionResponse);
-}
-public sealed record TokenSessionResponse(Guid UserId, string Email, string Role, string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string RefreshToken)
-{
-    public override string ToString() => nameof(TokenSessionResponse);
-}
-public sealed record TokenResponse(string AccessToken, string TokenType, DateTimeOffset AccessTokenExpiresAt, string RefreshToken)
-{
-    public override string ToString() => nameof(TokenResponse);
-}
-public sealed record UserResponse(Guid Id, string Email, string Role);
-
 internal static class AuthPayloadLimits
 {
     public const int CredentialsBytes = 16 * 1024;
     public const int RefreshBytes = 8 * 1024;
 }
-
 [ApiController]
 [Route("auth")]
 public sealed class AuthController(
@@ -171,32 +148,4 @@ public sealed class AuthController(
     private IActionResult NoStore(IActionResult result) { NoStore(); return result; }
     private void SetRefreshCookie(string value) => Response.Cookies.Append(RefreshCookie, value, new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" });
     private void DeleteAuthCookies() => BrowserCookiePolicy.Delete(Response);
-}
-
-public static class BrowserCookiePolicy
-{
-    public static bool IsTerminalRefreshFailure(ApplicationErrorCode code) => code is
-        ApplicationErrorCode.InvalidCredentials or ApplicationErrorCode.InvalidRefreshToken or
-        ApplicationErrorCode.RefreshTokenReuse or ApplicationErrorCode.SessionExpired or
-        ApplicationErrorCode.SessionRevoked;
-
-    public static void Delete(HttpResponse response)
-    {
-        var options = new CookieOptions { HttpOnly = true, Secure = true, SameSite = SameSiteMode.Strict, Path = "/" };
-        response.Cookies.Delete("__Host-refresh-token", options);
-        response.Cookies.Delete("__Host-csrf-token", options);
-    }
-}
-
-[ApiController]
-[Route("api/auth")]
-public sealed class MeController(GetMeUseCase getMe) : ControllerBase
-{
-    [HttpGet("me")]
-    [Authorize(Policy = SecurityPolicyNames.AuthenticatedUser)]
-    public async Task<IActionResult> Get(CancellationToken ct)
-    {
-        var result = await getMe.ExecuteAsync(ct);
-        return result.IsFailure ? ApiErrors.From(this, result.ErrorCode) : Ok(new UserResponse(result.Value!.Id, result.Value.Email, result.Value.Role.ToString()));
-    }
 }

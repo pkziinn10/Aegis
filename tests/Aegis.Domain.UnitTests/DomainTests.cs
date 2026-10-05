@@ -10,6 +10,53 @@ public sealed class DomainTests
 {
     private static readonly DateTimeOffset Now = new(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("short")]
+    public void Password_rejeita_valor_nulo_vazio_ou_curto(string? value)
+    {
+        var result = Password.Create(value);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(DomainErrorCode.InvalidPassword, result.ErrorCode);
+    }
+
+    [Fact]
+    public void Password_aceita_minimo_e_redige_valor()
+    {
+        var value = new string('p', Password.MinimumLength);
+        var result = Password.Create(value);
+
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(result.Value);
+        Assert.NotEqual(value, result.Value!.ToString());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    public void PasswordHash_rejeita_nulo_vazio_ou_branco(string? value)
+    {
+        var result = PasswordHash.Create(value);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(DomainErrorCode.InvalidPasswordHash, result.ErrorCode);
+    }
+
+    [Fact]
+    public void PasswordHash_preserva_hash_e_redige_valor()
+    {
+        const string value = "$argon2id$v=19$m=65536,t=3,p=4$hash";
+        var result = PasswordHash.Create(value);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(value, result.Value!.Value);
+        Assert.NotEqual(value, result.Value.ToString());
+    }
+
     [Fact]
     public void Email_normaliza_valor()
     {
@@ -46,7 +93,7 @@ public sealed class DomainTests
     public void User_preserva_identidade_e_permite_estado_e_papel()
     {
         var id = Guid.NewGuid();
-        var user = new User(id, new Email("user@example.com"), "hash-1");
+        var user = new User(id, new Email("user@example.com"), Hash("hash-1"));
         user.ChangeRole(UserRole.Admin);
         user.Deactivate();
 
@@ -59,7 +106,7 @@ public sealed class DomainTests
     [Fact]
     public void User_incrementa_version_somente_em_mutacoes_efetivas()
     {
-        var user = new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1", version: 4);
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"), version: 4);
 
         user.ChangeEmail(new Email("USER@example.com"));
         user.ChangeRole(UserRole.User);
@@ -74,10 +121,45 @@ public sealed class DomainTests
     }
 
     [Fact]
+    public void User_ativo_pode_autenticar_e_trocar_senha()
+    {
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"));
+
+        Assert.True(user.CanAuthenticate().IsSuccess);
+        Assert.True(user.CanChangePassword().IsSuccess);
+        Assert.True(user.ChangePasswordHash(Hash("hash-2")).IsSuccess);
+    }
+
+    [Fact]
+    public void User_inativo_nao_pode_autenticar_nem_trocar_senha()
+    {
+        var user = User.Rehydrate(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"),
+            UserRole.User, false, 1);
+
+        Assert.Equal(DomainErrorCode.AccountInactive, user.CanAuthenticate().ErrorCode);
+        Assert.Equal(DomainErrorCode.AccountInactive, user.CanChangePassword().ErrorCode);
+        Assert.Equal(DomainErrorCode.AccountInactive, user.ChangePasswordHash(Hash("hash-2")).ErrorCode);
+        Assert.Equal("hash-1", user.PasswordHash.Value);
+    }
+
+    [Fact]
+    public void User_desativacao_repetida_retorna_resultado_explicito()
+    {
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"));
+
+        Assert.True(user.Deactivate().IsSuccess);
+        var repeated = user.Deactivate();
+
+        Assert.False(repeated.IsSuccess);
+        Assert.Equal(DomainErrorCode.UserAlreadyDeactivated, repeated.ErrorCode);
+        Assert.Equal(2, user.Version);
+    }
+
+    [Fact]
     public void User_rejeita_version_invalida()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1", version: 0));
+            new User(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"), version: 0));
     }
 
     [Fact]
@@ -85,11 +167,11 @@ public sealed class DomainTests
     {
         var id = Guid.NewGuid();
         var email = new Email("user@example.com");
-        var user = User.Rehydrate(id, email, "hash-1", UserRole.Admin, false, 7);
+        var user = User.Rehydrate(id, email, Hash("hash-1"), UserRole.Admin, false, 7);
 
         Assert.Equal(id, user.Id);
         Assert.Equal(email, user.Email);
-        Assert.Equal("hash-1", user.PasswordHash);
+        Assert.Equal("hash-1", user.PasswordHash.Value);
         Assert.Equal(UserRole.Admin, user.Role);
         Assert.False(user.IsActive);
         Assert.Equal(7, user.Version);
@@ -103,24 +185,24 @@ public sealed class DomainTests
     [InlineData("\t")]
     public void User_rejeita_hash_de_senha_vazio_ou_branco(string passwordHash)
     {
-        var user = new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1");
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"));
 
-        var result = user.ChangePasswordHash(passwordHash);
+        var result = user.ChangePasswordHash(Hash(passwordHash));
 
         Assert.Equal(DomainErrorCode.InvalidPasswordHash, result.ErrorCode);
-        Assert.Equal("hash-1", user.PasswordHash);
+        Assert.Equal("hash-1", user.PasswordHash.Value);
         Assert.Equal(1, user.Version);
     }
 
     [Fact]
     public void User_altera_hash_e_incrementa_version()
     {
-        var user = new User(Guid.NewGuid(), new Email("user@example.com"), "hash-1", version: 4);
+        var user = new User(Guid.NewGuid(), new Email("user@example.com"), Hash("hash-1"), version: 4);
 
-        var result = user.ChangePasswordHash("hash-2");
+        var result = user.ChangePasswordHash(Hash("hash-2"));
 
         Assert.True(result.IsSuccess);
-        Assert.Equal("hash-2", user.PasswordHash);
+        Assert.Equal("hash-2", user.PasswordHash.Value);
         Assert.Equal(5, user.Version);
     }
 
@@ -137,10 +219,10 @@ public sealed class DomainTests
     [InlineData("\t")]
     public void User_rejeita_hash_vazio_ou_branco_na_criacao_e_reidratacao(string passwordHash)
     {
-        Assert.Throws<ArgumentException>(() =>
-            new User(Guid.NewGuid(), new Email("user@example.com"), passwordHash));
-        Assert.Throws<ArgumentException>(() =>
-            User.Rehydrate(Guid.NewGuid(), new Email("user@example.com"), passwordHash,
+        Assert.Throws<ArgumentNullException>(() =>
+            new User(Guid.NewGuid(), new Email("user@example.com"), Hash(passwordHash)));
+        Assert.Throws<ArgumentNullException>(() =>
+            User.Rehydrate(Guid.NewGuid(), new Email("user@example.com"), Hash(passwordHash),
                 UserRole.User, true, 1));
     }
 
@@ -148,18 +230,17 @@ public sealed class DomainTests
     public void SessionRevocationReason_inclui_password_changed()
     {
         Assert.True(Enum.IsDefined(SessionRevocationReason.PasswordChanged));
+        Assert.Equal(0, (int)SessionRevocationReason.Manual);
+        Assert.Equal(1, (int)SessionRevocationReason.RefreshTokenReuse);
+        Assert.Equal(2, (int)SessionRevocationReason.PasswordChanged);
+        Assert.Equal(3, (int)SessionRevocationReason.UserDeactivated);
     }
 
     [Fact]
-    public void Contrato_de_usuario_exige_insercao_atomica_condicional()
+    public void Contrato_de_usuario_separa_consulta_de_negocio_e_insercao()
     {
-        var method = typeof(IUserRepository).GetMethod("AddIfNotExistsAtomicallyAsync");
-
-        Assert.NotNull(method);
-        Assert.Equal(typeof(Task<UserInsertResult>), method!.ReturnType);
+        Assert.Null(typeof(IUserRepository).GetMethod("AddIfNotExistsAtomicallyAsync"));
         Assert.Contains("AddAsync", typeof(IUserRepository).GetMethods().Select(m => m.Name));
-        Assert.True(new UserInsertResult(UserInsertCode.Succeeded).IsSuccess);
-        Assert.False(new UserInsertResult(UserInsertCode.DuplicateEmail).IsSuccess);
     }
 
     [Fact]
@@ -233,6 +314,7 @@ public sealed class DomainTests
 
         Assert.Equal(DomainErrorCode.RefreshTokenReuse, result.ErrorCode);
         Assert.NotNull(session.RevokedAt);
+        Assert.Equal(SessionRevocationReason.RefreshTokenReuse, session.RevocationReason);
         Assert.All(session.RefreshTokens, token => Assert.NotNull(token.RevokedAt));
     }
 
@@ -278,6 +360,20 @@ public sealed class DomainTests
         Assert.Equal(Now.AddMinutes(1), session.RevokedAt);
         Assert.False(current.IsActive(Now.AddMinutes(2)));
         Assert.Equal(2, session.Version);
+    }
+
+    [Fact]
+    public void Rotacao_preserva_expiracao_absoluta_da_familia()
+    {
+        var session = CreateSession(out var current);
+        var originalExpiration = session.ExpiresAt;
+        var replacement = Token(session.Id, "replacement", Now.AddHours(2));
+
+        var result = session.Rotate(current.Hash, replacement, Now.AddMinutes(1));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(originalExpiration, session.ExpiresAt);
+        Assert.Equal(Now.AddHours(2), replacement.ExpiresAt);
     }
 
     [Fact]
@@ -450,4 +546,6 @@ public sealed class DomainTests
 
     private static RefreshToken Token(Guid sessionId, string hash, DateTimeOffset expiresAt) =>
         new(Guid.NewGuid(), sessionId, hash, Now, expiresAt);
+
+    private static PasswordHash Hash(string value) => PasswordHash.Create(value).Value!;
 }

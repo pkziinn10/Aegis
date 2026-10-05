@@ -5,22 +5,36 @@ namespace Aegis.Infrastructure.Persistence;
 
 public sealed class AuditWriter(AegisDbContext db, IClock clock) : IAuditWriter
 {
-    private static readonly HashSet<string> Allowed = ["reason", "result", "ip", "userAgent", "sessionId", "keyId"];
-    private static readonly HashSet<string> SafeResults = ["success", "family_revoked"];
-
-    public async Task WriteAsync(string action, Guid? userId, IReadOnlyDictionary<string, string?>? metadata = null, CancellationToken cancellationToken = default)
+    public Task WriteAsync(SecurityAuditEvent auditEvent, CancellationToken cancellationToken = default)
     {
-        var safe = metadata?
-            .Where(x => Allowed.Contains(x.Key) && IsSafeValue(x.Key, x.Value))
-            .ToDictionary(x => x.Key, x => x.Value);
-        db.AuditEvents.Add(new AuditEventRow { Action = action, UserId = userId, MetadataJson = safe is null ? null : JsonSerializer.Serialize(safe), CreatedAt = clock.UtcNow });
-        await db.SaveChangesAsync(cancellationToken);
+        ArgumentNullException.ThrowIfNull(auditEvent);
+        var metadata = new Dictionary<string, string?>
+        {
+            ["result"] = auditEvent.Result switch
+            {
+                SecurityAuditResult.Success => "success",
+                SecurityAuditResult.FamilyRevoked => "family_revoked",
+                _ => throw new ArgumentOutOfRangeException(nameof(auditEvent), auditEvent.Result, "Unsupported audit result.")
+            }
+        };
+        if (auditEvent.SessionId is Guid sessionId) metadata["sessionId"] = sessionId.ToString("N");
+
+        db.AuditEvents.Add(new AuditEventRow
+        {
+            Action = auditEvent.Action switch
+            {
+                SecurityAuditAction.Login => "login",
+                SecurityAuditAction.Logout => "logout",
+                SecurityAuditAction.RefreshRotation => "refresh_rotation",
+                SecurityAuditAction.RefreshTokenReuse => "refresh_token_reuse",
+                SecurityAuditAction.PasswordChange => "password_change",
+                SecurityAuditAction.UserDeactivation => "user_deactivation",
+                _ => throw new ArgumentOutOfRangeException(nameof(auditEvent), auditEvent.Action, "Unsupported audit action.")
+            },
+            UserId = auditEvent.UserId,
+            MetadataJson = JsonSerializer.Serialize(metadata),
+            CreatedAt = clock.UtcNow
+        });
+        return Task.CompletedTask;
     }
-
-    private static bool IsSafeValue(string key, string? value) => key switch
-    {
-        "result" => value is not null && SafeResults.Contains(value),
-        "sessionId" => value is not null && Guid.TryParse(value, out _),
-        _ => false
-    };
 }

@@ -18,7 +18,7 @@ public static class ApiErrors
             ApplicationErrorCode.InvalidCredentials or ApplicationErrorCode.Unauthorized or ApplicationErrorCode.InvalidRefreshToken or ApplicationErrorCode.SessionExpired or ApplicationErrorCode.SessionRevoked or ApplicationErrorCode.RefreshTokenReuse => 401,
             ApplicationErrorCode.InactiveUser => 403,
             ApplicationErrorCode.EmailAlreadyRegistered or ApplicationErrorCode.ConcurrencyConflict => 409,
-            ApplicationErrorCode.InvalidPasswordHash => 500,
+            ApplicationErrorCode.InvalidPasswordHash or ApplicationErrorCode.InternalServerError => 500,
             _ => 400
         };
         return Problem(context, status, status >= 500 ? "InternalServerError" : code.ToString());

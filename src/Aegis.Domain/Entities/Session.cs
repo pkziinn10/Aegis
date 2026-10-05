@@ -21,30 +21,79 @@ public sealed class Session
         IEnumerable<RefreshToken> refreshTokens, DateTimeOffset? revokedAt,
         SessionRevocationReason? revocationReason, long version, bool rehydrating)
     {
-        if (id == Guid.Empty) throw new ArgumentException("Identidade inválida.", nameof(id));
-        if (userId == Guid.Empty) throw new ArgumentException("Usuário inválido.", nameof(userId));
-        if (expiresAt <= createdAt) throw new ArgumentException("Sessão deve expirar depois da criação.", nameof(expiresAt));
-        if (version < 1) throw new ArgumentOutOfRangeException(nameof(version));
-        if ((revokedAt is null) != (revocationReason is null)) throw new ArgumentException("Revogação exige data e motivo.");
-        if (revocationReason is not null && !Enum.IsDefined(revocationReason.Value))
+        var hasValidIdentity = id != Guid.Empty;
+        if (!hasValidIdentity)
+            throw new ArgumentException("Identidade inválida.", nameof(id));
+
+        var hasValidUser = userId != Guid.Empty;
+        if (!hasValidUser)
+            throw new ArgumentException("Usuário inválido.", nameof(userId));
+
+        var hasValidChronology = expiresAt > createdAt;
+        if (!hasValidChronology)
+            throw new ArgumentException("Sessão deve expirar depois da criação.", nameof(expiresAt));
+
+        var hasValidVersion = version >= 1;
+        if (!hasValidVersion)
+            throw new ArgumentOutOfRangeException(nameof(version));
+
+        var hasRevocationDate = revokedAt is not null;
+        var hasRevocationReason = revocationReason is not null;
+        var hasCoherentRevocation = hasRevocationDate == hasRevocationReason;
+        if (!hasCoherentRevocation)
+            throw new ArgumentException("Revogação exige data e motivo.");
+
+        var hasValidRevocationReason = revocationReason is null || Enum.IsDefined(revocationReason.Value);
+        if (!hasValidRevocationReason)
             throw new ArgumentOutOfRangeException(nameof(revocationReason));
-        if (revokedAt is not null && revokedAt < createdAt) throw new ArgumentException("Data de revogação incoerente.", nameof(revokedAt));
-        Id = id; UserId = userId; CreatedAt = createdAt; ExpiresAt = expiresAt;
+
+        var hasValidRevocationDate = revokedAt is null || revokedAt >= createdAt;
+        if (!hasValidRevocationDate)
+            throw new ArgumentException("Data de revogação incoerente.", nameof(revokedAt));
+
+        Id = id;
+        UserId = userId;
+        CreatedAt = createdAt;
+        ExpiresAt = expiresAt;
         this.refreshTokens = refreshTokens?.ToList() ?? throw new ArgumentNullException(nameof(refreshTokens));
-        if (this.refreshTokens.Any(t => t.SessionId != id)) throw new ArgumentException("Refresh não pertence à sessão.", nameof(refreshTokens));
-        if (this.refreshTokens.Any(t => t.CreatedAt < createdAt || t.ExpiresAt > expiresAt))
+
+        var allRefreshTokensBelongToSession = this.refreshTokens.All(t => t.SessionId == id);
+        if (!allRefreshTokensBelongToSession)
+            throw new ArgumentException("Refresh não pertence à sessão.", nameof(refreshTokens));
+
+        var refreshTokensHaveValidChronology = this.refreshTokens.All(t =>
+            t.CreatedAt >= createdAt && t.ExpiresAt <= expiresAt);
+        if (!refreshTokensHaveValidChronology)
             throw new ArgumentException("Cronologia de refresh incoerente com a sessão.", nameof(refreshTokens));
-        if (revokedAt is not null && this.refreshTokens.Any(t => t.RevokedAt > revokedAt))
+
+        var refreshRevocationsFitSessionRevocation = revokedAt is null ||
+            this.refreshTokens.All(t => t.RevokedAt <= revokedAt);
+        if (!refreshRevocationsFitSessionRevocation)
             throw new ArgumentException("Revogação de refresh posterior à sessão.", nameof(refreshTokens));
-        if (this.refreshTokens.Select(t => t.Id).Distinct().Count() != this.refreshTokens.Count ||
-            this.refreshTokens.Select(t => t.Hash).Distinct(StringComparer.Ordinal).Count() != this.refreshTokens.Count)
+
+        var haveUniqueRefreshIds = this.refreshTokens.Select(t => t.Id).Distinct().Count() == this.refreshTokens.Count;
+        if (!haveUniqueRefreshIds)
             throw new ArgumentException("Refresh IDs e hashes devem ser únicos.", nameof(refreshTokens));
-        if (revokedAt is null && (rehydrating
-            ? this.refreshTokens.Count(t => t.RevokedAt is null) != 1
-            : this.refreshTokens.Count(t => t.IsActive(createdAt)) != 1))
+
+        var haveUniqueRefreshHashes = this.refreshTokens
+            .Select(t => t.Hash)
+            .Distinct(StringComparer.Ordinal)
+            .Count() == this.refreshTokens.Count;
+        if (!haveUniqueRefreshHashes)
+            throw new ArgumentException("Refresh IDs e hashes devem ser únicos.", nameof(refreshTokens));
+
+        var hasExactlyOneRefreshAvailable = rehydrating
+            ? this.refreshTokens.Count(t => t.RevokedAt is null) == 1
+            : this.refreshTokens.Count(t => t.IsActive(createdAt)) == 1;
+        var requiresActiveRefresh = revokedAt is null;
+        if (requiresActiveRefresh && !hasExactlyOneRefreshAvailable)
             throw new ArgumentException("Sessão deve possuir exatamente um refresh ativo.", nameof(refreshTokens));
-        if (revokedAt is not null && this.refreshTokens.Any(t => t.RevokedAt is null))
+
+        var revokedSessionHasNoActiveRefresh = this.refreshTokens.All(t => t.RevokedAt is not null);
+        var isRevokedSession = revokedAt is not null;
+        if (isRevokedSession && !revokedSessionHasNoActiveRefresh)
             throw new ArgumentException("Sessão revogada não pode possuir refresh ativo.", nameof(refreshTokens));
+
         RevokedAt = revokedAt;
         RevocationReason = revocationReason;
         Version = version;

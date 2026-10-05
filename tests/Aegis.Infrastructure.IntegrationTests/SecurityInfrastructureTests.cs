@@ -66,36 +66,28 @@ public sealed class SecurityInfrastructureTests : IClassFixture<PostgresContaine
     {
         var fixture = PostgresContainerFixture.Current;
         await using var db = fixture.CreateDbContext();
-        var action = $"redaction_probe_{Guid.NewGuid():N}";
-        var sensitive = new Dictionary<string, string?>
+        var action = SecurityAuditAction.Login;
+        var userId = Guid.NewGuid();
+
+        var unitOfWork = new EfUnitOfWork(db);
+        var auditWriter = new AuditWriter(db, new TestClock());
+        await unitOfWork.ExecuteInTransactionAsync(async ct =>
         {
-            ["reason"] = "person@example.com",
-            ["result"] = "success",
-            ["ip"] = "eyJhbGciOiJIUzI1NiJ9.jwt-secret.signature",
-            ["userAgent"] = "refresh-secret",
-            ["sessionId"] = "cookie-secret",
-            ["keyId"] = "jwt-signing-secret"
-        };
-
-        await new AuditWriter(db, new TestClock()).WriteAsync(action, null, sensitive);
-
-        var persisted = await db.AuditEvents.SingleAsync(x => x.Action == action);
-        Assert.Equal("{\"result\":\"success\"}", persisted.MetadataJson);
-        Assert.DoesNotContain("person@example.com", persisted.MetadataJson);
-        Assert.DoesNotContain("jwt-secret", persisted.MetadataJson);
-        Assert.DoesNotContain("refresh-secret", persisted.MetadataJson);
-        Assert.DoesNotContain("cookie-secret", persisted.MetadataJson);
-        Assert.DoesNotContain("jwt-signing-secret", persisted.MetadataJson);
-
-        var safeAction = $"redaction_safe_probe_{Guid.NewGuid():N}";
-        var sessionId = Guid.NewGuid();
-        await new AuditWriter(db, new TestClock()).WriteAsync(safeAction, null, new Dictionary<string, string?>
-        {
-            ["result"] = "family_revoked",
-            ["sessionId"] = sessionId.ToString("N")
+            await auditWriter.WriteAsync(new SecurityAuditEvent(action, userId, SecurityAuditResult.Success), ct);
+            return new TransactionOutcome<bool>(true, TransactionDecision.Commit);
         });
 
-        var safePersisted = await db.AuditEvents.SingleAsync(x => x.Action == safeAction);
+        var persisted = await db.AuditEvents.SingleAsync(x => x.UserId == userId);
+        Assert.Equal("{\"result\":\"success\"}", persisted.MetadataJson);
+
+        var sessionId = Guid.NewGuid();
+        await unitOfWork.ExecuteInTransactionAsync(async ct =>
+        {
+            await auditWriter.WriteAsync(new SecurityAuditEvent(SecurityAuditAction.RefreshTokenReuse, null, SecurityAuditResult.FamilyRevoked, sessionId), ct);
+            return new TransactionOutcome<bool>(true, TransactionDecision.Commit);
+        });
+
+        var safePersisted = await db.AuditEvents.SingleAsync(x => x.Action == "refresh_token_reuse");
         Assert.Contains("family_revoked", safePersisted.MetadataJson);
         Assert.Contains(sessionId.ToString("N"), safePersisted.MetadataJson);
     }

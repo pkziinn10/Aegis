@@ -3,6 +3,7 @@ using System;
 using Aegis.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,10 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Aegis.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(AegisDbContext))]
-    partial class AegisDbContextModelSnapshot : ModelSnapshot
+    [Migration("202610050001_AddSessionRevocationConstraints")]
+    partial class AddSessionRevocationConstraints : Migration
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
