@@ -60,6 +60,9 @@ Princípios seguidos:
 - O domínio não importa infraestrutura.
 - Configuração inválida provoca falha no startup (fail-fast), nunca 500 esporádico em produção.
 - Credenciais, tokens e segredos nunca são persistidos ou logados em texto claro.
+- Senhas brutas e hashes são value objects distintos; nenhum dos dois é exposto por `ToString()`.
+- A unidade de trabalho é a única dona de begin, commit e rollback; repositórios apenas aplicam alterações dentro da transação ativa.
+- Auditoria de operações mutáveis é tipada, obrigatória e participa da mesma transação da operação.
 
 ## Estrutura do repositório
 
@@ -195,6 +198,8 @@ Em próximas execuções, use `docker start aegis-postgres aegis-redis`.
 
 Tabelas gerenciadas: `users`, `sessions`, `refresh_tokens`, `audit_events`.
 
+As migrations também protegem invariantes de sessão no PostgreSQL: data e motivo de revogação devem coexistir, o motivo precisa ser válido e uma sessão revogada não pode manter refresh token ativo.
+
 Para aplicar a migration:
 
 ```bash
@@ -288,9 +293,9 @@ Usa cookies `__Host-refresh-token` e `__Host-csrf-token`, ambos `HttpOnly`, `Sec
 | `403` | Usuário inativo, origem ou CSRF inválidos |
 | `409` | E-mail duplicado, conflito de concorrência |
 | `429` | Rate limit excedido |
-| `500` | Erro interno (ex.: hash de senha inválido) |
+| `500` | Falha interna inesperada |
 
-Regras de domínio: senha mínima de **12 caracteres**; refresh token é rotacionado e o reuso de um token já usado revoga a família (`RefreshTokenReuse` → `401`).
+Regras de domínio: senha mínima de **12 caracteres**; refresh token possui expiração absoluta da família, é rotacionado a cada uso e o reuso de um token já consumido revoga toda a família (`RefreshTokenReuse` → `401`). Conta inativa não pode autenticar nem alterar senha.
 
 ## Segurança operacional
 
@@ -302,6 +307,8 @@ Regras de domínio: senha mínima de **12 caracteres**; refresh token é rotacio
 - **Rate limiting distribuído** por IP e por conta via Redis, fail-closed.
 - **Credenciais redigidas**: classes de request sobrescrevem `ToString()` para não vazar dados em logs.
 - **Segredos fora do repositório**: `appsettings.json` mantém apenas valores não sensíveis.
+- **Auditoria transacional**: login, logout, rotação/reuso de refresh, troca de senha e desativação usam ações tipadas e persistem junto da operação.
+- **Concorrência de refresh**: reuso prevalece sobre conflito de versão; a revogação da família é confirmada antes da resposta `401`.
 
 ## Testes
 
