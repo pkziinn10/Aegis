@@ -4,7 +4,7 @@ public enum ApplicationErrorCode
 {
     None = 0, InvalidRequest, WeakPassword, InvalidCredentials, EmailAlreadyRegistered,
     UserNotFound, InactiveUser, SessionNotFound, InvalidRefreshToken, RefreshTokenReuse,
-    SessionExpired, SessionRevoked, ConcurrencyConflict, InvalidPasswordHash, Unauthorized
+    SessionExpired, SessionRevoked, ConcurrencyConflict, InvalidPasswordHash, Unauthorized, InternalServerError
 }
 
 public class ApplicationResult

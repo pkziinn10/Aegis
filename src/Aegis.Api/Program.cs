@@ -8,10 +8,7 @@ using Aegis.Api.Configuration;
 using Aegis.Api.Controllers;
 using Aegis.Api.Security;
 using Aegis.Api.OpenApi;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using Aegis.Application;
@@ -51,11 +48,7 @@ builder.Services.AddAntiforgery(options =>
     options.Cookie.Path = "/";
 });
 
-builder.Services
-    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer();
-
-builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>, JwtBearerOptionsConfigurator>();
+builder.Services.AddAegisAuthentication();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<AccountRateLimitFilter>();
 builder.Services.AddAegisApplication();
@@ -124,12 +117,7 @@ builder.Services.AddCors(options =>
             .WithHeaders("Authorization", "Content-Type", "X-CSRF-TOKEN")
             .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")));
 
-builder.Services.AddCookiePolicy(options =>
-{
-    options.HttpOnly = HttpOnlyPolicy.Always;
-    options.Secure = CookieSecurePolicy.Always;
-    options.MinimumSameSitePolicy = SameSiteMode.Strict;
-});
+builder.Services.AddAegisCookiePolicy();
 
 builder.Services.AddHsts(options =>
 {

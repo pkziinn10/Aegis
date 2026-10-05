@@ -33,7 +33,6 @@ public static class DependencyInjection
         if (argon.MemoryKiB < 8192 || argon.Iterations < 1 || argon.Parallelism < 1 || argon.SaltBytes < 16 || argon.HashBytes < 16) throw new InvalidOperationException("Argon2 configuration is invalid.");
         services.AddScoped<IUserRepository, UserRepository>().AddScoped<ISessionRepository, SessionRepository>();
         services.AddScoped<IUnitOfWork, EfUnitOfWork>();
-        services.AddScoped<TransactionRunner>();
         services.AddScoped<IAuditWriter, AuditWriter>();
         services.AddSingleton<IPasswordHasher, Argon2idPasswordHasher>();
         services.AddSingleton<IRefreshTokenFactory, Sha256RefreshTokenFactory>();

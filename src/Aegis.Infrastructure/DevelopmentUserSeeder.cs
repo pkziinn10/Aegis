@@ -23,14 +23,48 @@ public static class DevelopmentUserSeeder
         var settings = ReadSettings(configuration);
         using var scope = services.CreateScope();
         var users = scope.ServiceProvider.GetRequiredService<IUserRepository>();
+        var unit = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
         var hasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher>();
+        var existingUser = await users.GetByEmailAsync(settings.UserEmail, cancellationToken);
+        var existingAdmin = await users.GetByEmailAsync(settings.AdminEmail, cancellationToken);
+        if (existingUser is not null && existingAdmin is not null)
+            return;
 
-        await users.AddIfNotExistsAtomicallyAsync(
-            new User(Guid.NewGuid(), settings.UserEmail, hasher.Hash(settings.UserPassword), UserRole.User),
-            cancellationToken);
-        await users.AddIfNotExistsAtomicallyAsync(
-            new User(Guid.NewGuid(), settings.AdminEmail, hasher.Hash(settings.AdminPassword), UserRole.Admin),
-            cancellationToken);
+        try
+        {
+            await unit.ExecuteInTransactionAsync(async ct =>
+            {
+                if (existingUser is null)
+                {
+                    var userPasswordHash = CreatePasswordHash(hasher.Hash(settings.UserPassword), "UserPassword");
+                    await users.AddAsync(new User(Guid.NewGuid(), settings.UserEmail, userPasswordHash, UserRole.User), ct);
+                }
+
+                if (existingAdmin is null)
+                {
+                    var adminPasswordHash = CreatePasswordHash(hasher.Hash(settings.AdminPassword), "AdminPassword");
+                    await users.AddAsync(new User(Guid.NewGuid(), settings.AdminEmail, adminPasswordHash, UserRole.Admin), ct);
+                }
+
+                return new TransactionOutcome<bool>(true, TransactionDecision.Commit);
+            }, cancellationToken);
+        }
+        catch (UniqueConstraintViolationException)
+        {
+            var userAfterRace = await users.GetByEmailAsync(settings.UserEmail, cancellationToken);
+            var adminAfterRace = await users.GetByEmailAsync(settings.AdminEmail, cancellationToken);
+            if (userAfterRace is null || adminAfterRace is null)
+                throw;
+        }
+    }
+
+    private static PasswordHash CreatePasswordHash(string value, string settingName)
+    {
+        var result = PasswordHash.Create(value);
+        if (result.IsFailure)
+            throw new InvalidOperationException($"DevelopmentSeed:{settingName} produced an invalid password hash.");
+
+        return result.Value!;
     }
 
     private static SeedSettings ReadSettings(IConfiguration configuration)

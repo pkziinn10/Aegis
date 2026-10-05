@@ -36,14 +36,75 @@ public sealed class PostgresInfrastructureTests : IClassFixture<PostgresContaine
     }
 
     [Fact]
+    public async Task Revocation_constraints_reject_invalid_direct_writes_and_allow_valid_states()
+    {
+        await AssertCheckConstraintViolation(
+            db =>
+            {
+                db.Sessions.Add(NewSession(revokedAt: DateTimeOffset.UtcNow, reason: null));
+                return Task.CompletedTask;
+            },
+            "CK_sessions_revocation_pair",
+            "A session with RevokedAt set must also have RevocationReason set");
+
+        await AssertCheckConstraintViolation(
+            db =>
+            {
+                db.Sessions.Add(NewSession(revokedAt: DateTimeOffset.UtcNow, reason: 4));
+                return Task.CompletedTask;
+            },
+            "CK_sessions_revocation_reason_range",
+            "A session revocation reason outside the supported range must be rejected");
+
+        await AssertDeferredConstraintViolation(
+            db =>
+            {
+                var session = NewSession(revokedAt: DateTimeOffset.UtcNow, reason: (int)SessionRevocationReason.Manual);
+                session.RefreshTokens.Add(new RefreshTokenRow
+                {
+                    Id = Guid.NewGuid(), SessionId = session.Id, Hash = Guid.NewGuid().ToString("N"),
+                    CreatedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddHours(1)
+                });
+                db.Sessions.Add(session);
+                return Task.CompletedTask;
+            },
+            "CK_sessions_no_active_refresh_token_when_revoked",
+            "A revoked session must not have an active refresh token when the transaction commits");
+
+        await using (var db = ResetDatabase())
+        {
+            var session = NewSession(revokedAt: DateTimeOffset.UtcNow, reason: (int)SessionRevocationReason.Manual);
+            session.RefreshTokens.Add(new RefreshTokenRow
+            {
+                Id = Guid.NewGuid(), SessionId = session.Id, Hash = Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddHours(1), RevokedAt = DateTimeOffset.UtcNow
+            });
+            db.Sessions.Add(session);
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = ResetDatabase())
+        {
+            var session = NewSession();
+            session.RefreshTokens.Add(new RefreshTokenRow
+            {
+                Id = Guid.NewGuid(), SessionId = session.Id, Hash = Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddHours(1)
+            });
+            db.Sessions.Add(session);
+            await db.SaveChangesAsync();
+        }
+    }
+
+    [Fact]
     public async Task Concurrent_rotation_allows_one_winner_and_one_reuse()
     {
         await using (var setup = Create()) { await setup.Database.EnsureDeletedAsync(); await setup.Database.MigrateAsync(); }
-        var user = new User(Guid.NewGuid(), new Email($"{Guid.NewGuid():N}@example.com"), "hash");
+        var user = new User(Guid.NewGuid(), new Email($"{Guid.NewGuid():N}@example.com"), Hash("hash"));
         var now = DateTimeOffset.UtcNow;
         var initial = new RefreshToken(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid().ToString("N"), now, now.AddHours(1));
         var session = new Session(initial.Id == Guid.Empty ? Guid.NewGuid() : initial.SessionId, user.Id, now, now.AddHours(1), [initial]);
-        await using (var seed = Create()) { seed.Users.Add(new UserRow { Id = user.Id, Email = user.Email.Value, PasswordHash = user.PasswordHash, Role = (int)user.Role, IsActive = true, Version = 1 }); seed.Sessions.Add(new SessionRow { Id = session.Id, UserId = user.Id, CreatedAt = now, ExpiresAt = now.AddHours(1), Version = 1, RefreshTokens = [new RefreshTokenRow { Id = initial.Id, SessionId = session.Id, Hash = initial.Hash, CreatedAt = now, ExpiresAt = now.AddHours(1) }] }); await seed.SaveChangesAsync(); }
+        await using (var seed = Create()) { seed.Users.Add(new UserRow { Id = user.Id, Email = user.Email.Value, PasswordHash = user.PasswordHash.Value, Role = (int)user.Role, IsActive = true, Version = 1 }); seed.Sessions.Add(new SessionRow { Id = session.Id, UserId = user.Id, CreatedAt = now, ExpiresAt = now.AddHours(1), Version = 1, RefreshTokens = [new RefreshTokenRow { Id = initial.Id, SessionId = session.Id, Hash = initial.Hash, CreatedAt = now, ExpiresAt = now.AddHours(1) }] }); await seed.SaveChangesAsync(); }
         var a = Rotate(session.Id, initial.Hash, Guid.NewGuid().ToString("N"), now);
         var b = Rotate(session.Id, initial.Hash, Guid.NewGuid().ToString("N"), now);
         var results = await Task.WhenAll(a, b);
@@ -71,7 +132,7 @@ public sealed class PostgresInfrastructureTests : IClassFixture<PostgresContaine
         await using (var setup = Create()) { await setup.Database.EnsureDeletedAsync(); await setup.Database.MigrateAsync(); }
         await using (var db = Create())
         {
-            var uow = new EfUnitOfWork(db, new TransactionRunner(db));
+            var uow = new EfUnitOfWork(db);
             await uow.ExecuteInTransactionAsync<int>(async ct => { db.AuditEvents.Add(new AuditEventRow { Action = "rollback_probe", CreatedAt = DateTimeOffset.UtcNow }); await Task.CompletedTask; return new(7, TransactionDecision.Rollback); });
             Assert.Empty(db.ChangeTracker.Entries());
         }
@@ -79,17 +140,21 @@ public sealed class PostgresInfrastructureTests : IClassFixture<PostgresContaine
     }
 
     [Fact]
-    public async Task Duplicate_email_and_user_cas_are_atomic()
+    public async Task Unique_email_violation_is_technical_and_concurrent_insert_has_one_winner()
     {
         await using (var setup = Create()) { await setup.Database.EnsureDeletedAsync(); await setup.Database.MigrateAsync(); }
-        var id = Guid.NewGuid(); var domain = new User(id, new Email($"{Guid.NewGuid():N}@example.com"), "hash");
-        await using (var seed = Create()) { seed.Users.Add(new UserRow { Id = id, Email = domain.Email.Value, PasswordHash = domain.PasswordHash, Role = 0, IsActive = true, Version = 1 }); await seed.SaveChangesAsync(); }
-        await using var firstDb = Create(); var first = new UserRepository(firstDb, new TransactionRunner(firstDb));
-        var duplicate = await first.AddIfNotExistsAtomicallyAsync(new User(Guid.NewGuid(), domain.Email, "hash")); Assert.Equal(Aegis.Domain.Repositories.UserInsertCode.DuplicateEmail, duplicate.Code);
-        var current = await first.GetByIdAsync(id); var changed = User.Rehydrate(current!.Id, current.Email, "new-hash", current.Role, current.IsActive, current.Version); var winner = await first.UpdateAtomicallyAsync(changed, 1); Assert.True(winner.IsSuccess);
-        await using var secondDb = Create(); var second = new UserRepository(secondDb, new TransactionRunner(secondDb)); var stale = User.Rehydrate(id, domain.Email, "stale", domain.Role, true, 1); var loser = await second.UpdateAtomicallyAsync(stale, 1); Assert.Equal(Aegis.Domain.Repositories.UserUpdateCode.ConcurrencyConflict, loser.Code);
+        var id = Guid.NewGuid(); var domain = new User(id, new Email($"{Guid.NewGuid():N}@example.com"), Hash("hash"));
+        await using (var seed = Create()) { seed.Users.Add(new UserRow { Id = id, Email = domain.Email.Value, PasswordHash = domain.PasswordHash.Value, Role = 0, IsActive = true, Version = 1 }); await seed.SaveChangesAsync(); }
+        await using var firstDb = Create(); var first = new UserRepository(firstDb);
+         var duplicate = await Assert.ThrowsAsync<Aegis.Domain.Repositories.UniqueConstraintViolationException>(() =>
+             InTransaction(firstDb, async ct => { await first.AddAsync(new User(Guid.NewGuid(), domain.Email, Hash("hash")), ct); return 0; }));
+         Assert.DoesNotContain("email", duplicate.Message, StringComparison.OrdinalIgnoreCase);
+         var current = await first.GetByIdAsync(id); var changed = User.Rehydrate(current!.Id, current.Email, Hash("new-hash"), current.Role, current.IsActive, current.Version); var winner = await InTransaction(firstDb, ct => first.UpdateAtomicallyAsync(changed, 1, ct)); Assert.True(winner.IsSuccess);
+         await using var secondDb = Create(); var second = new UserRepository(secondDb); var stale = User.Rehydrate(id, domain.Email, Hash("stale"), domain.Role, true, 1); var loser = await InTransaction(secondDb, ct => second.UpdateAtomicallyAsync(stale, 1, ct)); Assert.Equal(Aegis.Domain.Repositories.UserUpdateCode.ConcurrencyConflict, loser.Code);
         var concurrentEmail = new Email($"{Guid.NewGuid():N}@example.com");
-        var inserts = await Task.WhenAll(Insert(concurrentEmail), Insert(concurrentEmail)); Assert.Single(inserts, x => x.Code == Aegis.Domain.Repositories.UserInsertCode.Succeeded); Assert.Single(inserts, x => x.Code == Aegis.Domain.Repositories.UserInsertCode.DuplicateEmail);
+         var inserts = await Task.WhenAll(Insert(concurrentEmail), Insert(concurrentEmail));
+         Assert.Single(inserts, x => x);
+         Assert.Single(inserts, x => !x);
     }
 
     [Fact]
@@ -98,19 +163,69 @@ public sealed class PostgresInfrastructureTests : IClassFixture<PostgresContaine
         await using (var setup = Create()) { await setup.Database.EnsureDeletedAsync(); await setup.Database.MigrateAsync(); }
         var userId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow; await using (var seed = Create()) { seed.Users.Add(new UserRow { Id = userId, Email = $"{Guid.NewGuid():N}@example.com", PasswordHash = "hash", Role = 0, IsActive = true, Version = 1 }); await seed.SaveChangesAsync(); }
         var sessionId = Guid.NewGuid(); var refresh = new RefreshToken(Guid.NewGuid(), sessionId, Guid.NewGuid().ToString("N"), now, now.AddHours(1)); var session = new Session(sessionId, userId, now, now.AddHours(1), [refresh]);
-        var create = Task.Run(async () => { await using var db = Create(); return await new SessionRepository(db, new TransactionRunner(db)).AddIfUserActiveAtomicallyAsync(session, 1); });
-        var revoke = Task.Run(async () => { await using var db = Create(); return await new SessionRepository(db, new TransactionRunner(db)).RevokeAllByUserIdAtomicallyAsync(userId, now, SessionRevocationReason.Manual); });
+         var create = Task.Run(async () => { await using var db = Create(); var repo = new SessionRepository(db); return await InTransaction(db, ct => repo.AddIfUserActiveAtomicallyAsync(session, 1, ct)); });
+         var revoke = Task.Run(async () => { await using var db = Create(); var repo = new SessionRepository(db); return await InTransaction(db, ct => repo.RevokeAllByUserIdAtomicallyAsync(userId, now, SessionRevocationReason.Manual, ct)); });
         await Task.WhenAll(create, revoke); var createResult = await create; var revokeResult = await revoke;
         await using var verify = Create(); var persisted = await verify.Sessions.Include(x => x.RefreshTokens).SingleOrDefaultAsync(x => x.Id == sessionId); Assert.True(createResult.IsSuccess); Assert.True(revokeResult.IsSuccess); if (persisted?.RevokedAt is not null) Assert.All(persisted.RefreshTokens, x => Assert.NotNull(x.RevokedAt)); else if (persisted is not null) Assert.All(persisted.RefreshTokens, x => Assert.Null(x.RevokedAt));
     }
 
     private async Task<Aegis.Domain.Repositories.SessionRotationResult> Rotate(Guid id, string hash, string replacementHash, DateTimeOffset now)
     {
-        await using var db = Create(); var repo = new SessionRepository(db, new TransactionRunner(db));
+        await using var db = Create(); var repo = new SessionRepository(db);
         var replacement = new RefreshToken(Guid.NewGuid(), id, replacementHash, now, now.AddMinutes(30));
-        return await repo.RotateAndPersistAtomicallyAsync(id, hash, replacement, now, 1);
+         return await InTransaction(db, ct => repo.RotateAndPersistAtomicallyAsync(id, hash, replacement, now, 1, ct));
     }
-    private async Task<Aegis.Domain.Repositories.SessionOperationResult> Revoke(string hash, DateTimeOffset now) { await using var db = Create(); return await new SessionRepository(db, new TransactionRunner(db)).RevokeByRefreshTokenHashAtomicallyAsync(hash, now, SessionRevocationReason.Manual); }
+     private async Task<Aegis.Domain.Repositories.SessionOperationResult> Revoke(string hash, DateTimeOffset now) { await using var db = Create(); return await InTransaction(db, ct => new SessionRepository(db).RevokeByRefreshTokenHashAtomicallyAsync(hash, now, SessionRevocationReason.Manual, ct)); }
     private AegisDbContext Create() => _fixture.CreateDbContext();
-    private async Task<Aegis.Domain.Repositories.UserInsertResult> Insert(Email email) { await using var db = Create(); return await new UserRepository(db, new TransactionRunner(db)).AddIfNotExistsAtomicallyAsync(new User(Guid.NewGuid(), email, "hash")); }
+    private AegisDbContext ResetDatabase()
+    {
+        var db = Create();
+        db.Database.EnsureDeleted();
+        db.Database.Migrate();
+        db.Users.Add(new UserRow { Id = _testUserId, Email = $"{_testUserId:N}@example.com", PasswordHash = "hash", Role = 0, IsActive = true, Version = 1 });
+        db.SaveChanges();
+        return db;
+    }
+
+    private readonly Guid _testUserId = Guid.NewGuid();
+
+    private SessionRow NewSession(DateTimeOffset? revokedAt = null, int? reason = null) => new()
+    {
+        Id = Guid.NewGuid(), UserId = _testUserId, CreatedAt = DateTimeOffset.UtcNow,
+        ExpiresAt = DateTimeOffset.UtcNow.AddHours(1), RevokedAt = revokedAt, RevocationReason = reason, Version = 1
+    };
+
+    private async Task AssertCheckConstraintViolation(Func<AegisDbContext, Task> arrange, string constraint, string message)
+    {
+        await using var db = ResetDatabase();
+        await arrange(db);
+        var exception = await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        Assert.True(exception.ToString().Contains(constraint, StringComparison.Ordinal), message);
+    }
+
+    private async Task AssertDeferredConstraintViolation(Func<AegisDbContext, Task> arrange, string constraint, string message)
+    {
+        await using var db = ResetDatabase();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await arrange(db);
+        await db.SaveChangesAsync();
+        var exception = await Assert.ThrowsAsync<PostgresException>(() => transaction.CommitAsync());
+        Assert.True(exception.ToString().Contains(constraint, StringComparison.Ordinal), message);
+    }
+      private async Task<bool> Insert(Email email)
+      {
+          await using var db = Create();
+          try
+          {
+               await InTransaction(db, async ct => { await new UserRepository(db).AddAsync(new User(Guid.NewGuid(), email, Hash("hash")), ct); return 0; });
+              return true;
+          }
+          catch (Aegis.Domain.Repositories.UniqueConstraintViolationException)
+          {
+              return false;
+          }
+      }
+     private static async Task<T> InTransaction<T>(AegisDbContext db, Func<CancellationToken, Task<T>> operation)
+     { var uow = new EfUnitOfWork(db); return await uow.ExecuteInTransactionAsync(async ct => new TransactionOutcome<T>(await operation(ct), TransactionDecision.Commit)); }
+    private static PasswordHash Hash(string value) => PasswordHash.Create(value).Value!;
 }
